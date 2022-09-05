@@ -70,7 +70,8 @@ def register_all_modules(init_default_scope: bool = True) -> None:
     import mmdet3d.datasets  # noqa: F401,F403
     import mmdet3d.evaluation.metrics  # noqa: F401,F403
     import mmdet3d.structures  # noqa: F401,F403
-    import mmdet3d.visualization  # noqa: F401,F403
+
+    # import mmdet3d.visualization  # noqa: F401,F403
     if init_default_scope:
         never_created = DefaultScope.get_current_instance() is None \
                         or not DefaultScope.check_instance_created('mmdet3d')

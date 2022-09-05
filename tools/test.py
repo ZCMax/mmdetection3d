@@ -3,6 +3,7 @@ import argparse
 import os
 import os.path as osp
 
+import torch
 from mmengine.config import Config, DictAction
 from mmengine.registry import RUNNERS
 from mmengine.runner import Runner
@@ -42,6 +43,9 @@ def parse_args():
 
 
 def main():
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
     args = parse_args()
 
     # register all modules in mmdet3d into the registries
