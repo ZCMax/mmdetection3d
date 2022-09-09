@@ -48,7 +48,7 @@ train_dataloader = dict(
     dataset=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file='kitti_infos_train.pkl',
+        ann_file='kitti_infos_train_v2.pkl',
         data_prefix=dict(img='training/image_2'),
         pipeline=train_pipeline,
         modality=input_modality,
@@ -56,6 +56,7 @@ train_dataloader = dict(
         metainfo=metainfo,
         # we use box_type_3d='Camera' in monocular 3d
         # detection task
+        task='mono3d',
         box_type_3d='Camera'))
 val_dataloader = dict(
     batch_size=1,
@@ -67,11 +68,12 @@ val_dataloader = dict(
         type=dataset_type,
         data_root=data_root,
         data_prefix=dict(img='training/image_2'),
-        ann_file='kitti_infos_val.pkl',
+        ann_file='kitti_infos_val_v2.pkl',
         pipeline=test_pipeline,
         modality=input_modality,
         metainfo=metainfo,
         test_mode=True,
+        task='mono3d',
         box_type_3d='Camera'))
 test_dataloader = val_dataloader
 
