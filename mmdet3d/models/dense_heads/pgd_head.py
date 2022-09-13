@@ -323,7 +323,7 @@ class PGDHead(FCOSMono3DHead):
         """
         views = [np.array(img_meta['cam2img']) for img_meta in batch_img_metas]
         scale_factors = [
-            img_meta['scale_factor'][0] for img_meta in batch_img_metas
+            img_meta['scale_factor'] for img_meta in batch_img_metas
         ]
 
         num_imgs = len(batch_img_metas)
@@ -399,8 +399,11 @@ class PGDHead(FCOSMono3DHead):
                 device=pos_strided_bbox_preds.device)
             view_shape = views[idx].shape
             scale_factor = scale_factors[idx]
-            pos_strided_bbox_preds[mask, 2] *= scale_factor
-            pos_bbox_targets_3d[mask, 2] *= scale_factor
+            pos_strided_bbox_preds[mask, 2] *= pos_strided_bbox_preds[
+                mask, 2].new_tensor(scale_factor[0])
+            pos_bbox_targets_3d[mask,
+                                2] *= pos_bbox_targets_3d[mask, 2].new_tensor(
+                                    scale_factor[0])
             cam2img[:view_shape[0], :view_shape[1]] = \
                 pos_strided_bbox_preds.new_tensor(views[idx])
 
