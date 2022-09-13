@@ -90,7 +90,11 @@ train_pipeline = [
         with_bbox_3d=True,
         with_label_3d=True,
         with_bbox_depth=True),
-    dict(type='Resize3D', scale=(1242, 375), keep_ratio=True),
+    dict(
+        type='RandomResize3D',
+        scale=(1242, 375),
+        ratio_range=(0.8, 1.2),
+        keep_ratio=True),
     dict(type='RandomFlip3D', flip_ratio_bev_horizontal=0.5),
     dict(
         type='Pack3DDetInputs',

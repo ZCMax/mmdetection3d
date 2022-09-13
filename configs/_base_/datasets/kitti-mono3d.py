@@ -48,7 +48,7 @@ train_dataloader = dict(
     dataset=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file='kitti_infos_train_v2.pkl',
+        ann_file='kitti_infos_train.pkl',
         data_prefix=dict(img='training/image_2'),
         pipeline=train_pipeline,
         modality=input_modality,
@@ -68,7 +68,7 @@ val_dataloader = dict(
         type=dataset_type,
         data_root=data_root,
         data_prefix=dict(img='training/image_2'),
-        ann_file='kitti_infos_val_v2.pkl',
+        ann_file='kitti_infos_val.pkl',
         pipeline=test_pipeline,
         modality=input_modality,
         metainfo=metainfo,

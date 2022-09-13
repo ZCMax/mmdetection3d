@@ -1842,6 +1842,7 @@ class Resize3D(Resize):
         ``results['scale']``."""
         if 'centers_2d' in results:
             results['centers_2d'] *= results['scale_factor'][:2]
+            results['depths'] /= results['scale_factor'][0]
         results['cam2img'][0] *= np.array(results['scale_factor'][0])
         results['cam2img'][1] *= np.array(results['scale_factor'][1])
 
@@ -1876,6 +1877,7 @@ class RandomResize3D(RandomResize):
         ``results['scale']``."""
         if 'centers_2d' in results:
             results['centers_2d'] *= results['scale_factor'][:2]
+            results['depths'] /= results['scale_factor'][0]
         results['cam2img'][0] *= np.array(results['scale_factor'][0])
         results['cam2img'][1] *= np.array(results['scale_factor'][1])
 
