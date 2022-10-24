@@ -9,11 +9,12 @@ from .lyft_dataset import LyftDataset
 from .nuscenes_dataset import NuScenesDataset
 from .nuscenes_mono_dataset import NuScenesMonoDataset
 # yapf: disable
-from .pipelines import (AffineResize, BackgroundPointsFilter, GlobalAlignment,
-                        GlobalRotScaleTrans, IndoorPatchPointSample,
-                        IndoorPointSample, LoadAnnotations3D,
-                        LoadPointsFromDict, LoadPointsFromFile,
-                        LoadPointsFromMultiSweeps, MultiViewWrapper,
+from .pipelines import (AffineResize, BackgroundPointsFilter, CenterDLE,
+                        CenterFilter, GlobalAlignment, GlobalRotScaleTrans,
+                        IndoorPatchPointSample, IndoorPointSample,
+                        LoadAnnotations3D, LoadPointsFromDict,
+                        LoadPointsFromFile, LoadPointsFromMultiSweeps,
+                        Mono3DResize, Mono3DResizeV2, MultiViewWrapper,
                         NormalizePointsColor, ObjectNameFilter, ObjectNoise,
                         ObjectRangeFilter, ObjectSample, PointSample,
                         PointShuffle, PointsRangeFilter, RandomDropPointsColor,
@@ -43,5 +44,6 @@ __all__ = [
     'VoxelBasedPointSampler', 'get_loading_pipeline', 'RandomDropPointsColor',
     'RandomJitterPoints', 'ObjectNameFilter', 'AffineResize',
     'RandomShiftScale', 'LoadPointsFromDict', 'PIPELINES',
-    'RangeLimitedRandomCrop', 'RandomRotate', 'MultiViewWrapper'
+    'RangeLimitedRandomCrop', 'RandomRotate', 'MultiViewWrapper',
+    'Mono3DResize', 'Mono3DResizeV2', 'CenterFilter', 'CenterDLE'
 ]

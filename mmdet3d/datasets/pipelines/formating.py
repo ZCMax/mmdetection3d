@@ -137,7 +137,8 @@ class Collect3D(object):
                    'box_type_3d', 'img_norm_cfg', 'pcd_trans', 'sample_idx',
                    'pcd_scale_factor', 'pcd_rotation', 'pcd_rotation_angle',
                    'pts_filename', 'transformation_3d_flow', 'trans_mat',
-                   'affine_aug')):
+                   'affine_aug', 'scale', 'depth_factors', 'calib', 'tag',
+                   'ori_filename', 'center', 'size')):
         self.keys = keys
         self.meta_keys = meta_keys
 
@@ -226,6 +227,9 @@ class DefaultFormatBundle3D(DefaultFormatBundle):
                         gt_bboxes_3d_mask]
                 if 'depths' in results:
                     results['depths'] = results['depths'][gt_bboxes_3d_mask]
+                if 'depths' in results:
+                    results['depth_factors'] = results['depth_factors'][
+                        gt_bboxes_3d_mask]
             if 'gt_bboxes_mask' in results:
                 gt_bboxes_mask = results['gt_bboxes_mask']
                 if 'gt_bboxes' in results:

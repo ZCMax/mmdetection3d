@@ -3,7 +3,9 @@ import random
 import warnings
 
 import cv2
+import mmcv
 import numpy as np
+import torch
 from mmcv import is_tuple_of
 from mmcv.utils import build_from_cfg
 
@@ -134,7 +136,7 @@ class RandomFlip3D(RandomFlip):
         if 'centers2d' in input_dict:
             assert self.sync_2d is True and direction == 'horizontal', \
                 'Only support sync_2d=True and horizontal flip with images'
-            w = input_dict['ori_shape'][1]
+            w = input_dict['img_shape'][1]
             input_dict['centers2d'][..., 0] = \
                 w - input_dict['centers2d'][..., 0]
             # need to modify the horizontal position of camera center
@@ -1850,4 +1852,807 @@ class RandomShiftScale(object):
         repr_str = self.__class__.__name__
         repr_str += f'(shift_scale={self.shift_scale}, '
         repr_str += f'aug_prob={self.aug_prob}) '
+        return repr_str
+
+
+@PIPELINES.register_module()
+class Mono3DResize:
+    """Resize images & bbox & mask.
+
+    This transform resizes the input image to some scale. Bboxes and masks are
+    then resized with the same scale factor. If the input dict contains the key
+    "scale", then the scale in the input dict is used, otherwise the specified
+    scale in the init method is used. If the input dict contains the key
+    "scale_factor" (if MultiScaleFlipAug does not give img_scale but
+    scale_factor), the actual scale will be computed by image shape and
+    scale_factor.
+
+    `img_scale` can either be a tuple (single-scale) or a list of tuple
+    (multi-scale). There are 3 multiscale modes:
+
+    - ``ratio_range is not None``: randomly sample a ratio from the ratio \
+      range and multiply it with the image scale.
+    - ``ratio_range is None`` and ``multiscale_mode == "range"``: randomly \
+      sample a scale from the multiscale range.
+    - ``ratio_range is None`` and ``multiscale_mode == "value"``: randomly \
+      sample a scale from multiple scales.
+
+    Args:
+        img_scale (tuple or list[tuple]): Images scales for resizing.
+        multiscale_mode (str): Either "range" or "value".
+        ratio_range (tuple[float]): (min_ratio, max_ratio)
+        keep_ratio (bool): Whether to keep the aspect ratio when resizing the
+            image.
+        bbox_clip_border (bool, optional): Whether to clip the objects outside
+            the border of the image. In some dataset like MOT17, the gt bboxes
+            are allowed to cross the border of images. Therefore, we don't
+            need to clip the gt bboxes in these cases. Defaults to True.
+        backend (str): Image resize backend, choices are 'cv2' and 'pillow'.
+            These two backends generates slightly different results. Defaults
+            to 'cv2'.
+        override (bool, optional): Whether to override `scale` and
+            `scale_factor` so as to call resize twice. Default False. If True,
+            after the first resizing, the existed `scale` and `scale_factor`
+            will be ignored so the second resizing can be allowed.
+            This option is a work-around for multiple times of resize in DETR.
+            Defaults to False.
+    """
+
+    def __init__(self,
+                 img_scale=None,
+                 multiscale_mode='range',
+                 ratio_range=None,
+                 keep_ratio=True,
+                 bbox_clip_border=True,
+                 backend='cv2',
+                 override=False,
+                 scale_depth_by_focal_lengths_factor=500,
+                 scale_cam=True):
+        self.scale_depth_by_focal_lengths_factor = \
+            scale_depth_by_focal_lengths_factor
+        if img_scale is None:
+            self.img_scale = None
+        else:
+            if isinstance(img_scale, list):
+                self.img_scale = img_scale
+            else:
+                self.img_scale = [img_scale]
+            assert mmcv.is_list_of(self.img_scale, tuple)
+
+        if ratio_range is not None:
+            # mode 1: given a scale and a range of image ratio
+            assert len(self.img_scale) == 1
+        else:
+            # mode 2: given multiple scales or a range of scales
+            assert multiscale_mode in ['value', 'range']
+
+        self.backend = backend
+        self.multiscale_mode = multiscale_mode
+        self.ratio_range = ratio_range
+        self.keep_ratio = keep_ratio
+        # TODO: refactor the override option in Resize
+        self.override = override
+        self.bbox_clip_border = bbox_clip_border
+
+        self.scale_cam = scale_cam
+
+    @staticmethod
+    def random_select(img_scales):
+        """Randomly select an img_scale from given candidates.
+
+        Args:
+            img_scales (list[tuple]): Images scales for selection.
+
+        Returns:
+            (tuple, int): Returns a tuple ``(img_scale, scale_dix)``, \
+                where ``img_scale`` is the selected image scale and \
+                ``scale_idx`` is the selected index in the given candidates.
+        """
+
+        assert mmcv.is_list_of(img_scales, tuple)
+        scale_idx = np.random.randint(len(img_scales))
+        img_scale = img_scales[scale_idx]
+        return img_scale, scale_idx
+
+    @staticmethod
+    def random_sample(img_scales):
+        """Randomly sample an img_scale when ``multiscale_mode=='range'``.
+
+        Args:
+            img_scales (list[tuple]): Images scale range for sampling.
+                There must be two tuples in img_scales, which specify the lower
+                and upper bound of image scales.
+
+        Returns:
+            (tuple, None): Returns a tuple ``(img_scale, None)``, where \
+                ``img_scale`` is sampled scale and None is just a placeholder \
+                to be consistent with :func:`random_select`.
+        """
+
+        assert mmcv.is_list_of(img_scales, tuple) and len(img_scales) == 2
+        img_scale_long = [max(s) for s in img_scales]
+        img_scale_short = [min(s) for s in img_scales]
+        long_edge = np.random.randint(
+            min(img_scale_long),
+            max(img_scale_long) + 1)
+        short_edge = np.random.randint(
+            min(img_scale_short),
+            max(img_scale_short) + 1)
+        img_scale = (long_edge, short_edge)
+        return img_scale, None
+
+    @staticmethod
+    def random_sample_ratio(img_scale, ratio_range):
+        """Randomly sample an img_scale when ``ratio_range`` is specified.
+
+        A ratio will be randomly sampled from the range specified by
+        ``ratio_range``. Then it would be multiplied with ``img_scale`` to
+        generate sampled scale.
+
+        Args:
+            img_scale (tuple): Images scale base to multiply with ratio.
+            ratio_range (tuple[float]): The minimum and maximum ratio to scale
+                the ``img_scale``.
+
+        Returns:
+            (tuple, None): Returns a tuple ``(scale, None)``, where \
+                ``scale`` is sampled ratio multiplied with ``img_scale`` and \
+                None is just a placeholder to be consistent with \
+                :func:`random_select`.
+        """
+
+        assert isinstance(img_scale, tuple) and len(img_scale) == 2
+        min_ratio, max_ratio = ratio_range
+        assert min_ratio <= max_ratio
+        ratio = np.random.random_sample() * (max_ratio - min_ratio) + min_ratio
+        scale = int(img_scale[0] * ratio), int(img_scale[1] * ratio)
+        return scale, None
+
+    def _random_scale(self, results):
+        """Randomly sample an img_scale according to ``ratio_range`` and
+        ``multiscale_mode``.
+
+        If ``ratio_range`` is specified, a ratio will be sampled and be
+        multiplied with ``img_scale``.
+        If multiple scales are specified by ``img_scale``, a scale will be
+        sampled according to ``multiscale_mode``.
+        Otherwise, single scale will be used.
+
+        Args:
+            results (dict): Result dict from :obj:`dataset`.
+
+        Returns:
+            dict: Two new keys 'scale` and 'scale_idx` are added into \
+                ``results``, which would be used by subsequent pipelines.
+        """
+
+        if self.ratio_range is not None:
+            scale, scale_idx = self.random_sample_ratio(
+                self.img_scale[0], self.ratio_range)
+        elif len(self.img_scale) == 1:
+            scale, scale_idx = self.img_scale[0], 0
+        elif self.multiscale_mode == 'range':
+            scale, scale_idx = self.random_sample(self.img_scale)
+        elif self.multiscale_mode == 'value':
+            scale, scale_idx = self.random_select(self.img_scale)
+        else:
+            raise NotImplementedError
+
+        results['scale'] = scale
+        results['scale_idx'] = scale_idx
+
+    def _resize_img(self, results):
+        """Resize images with ``results['scale']``."""
+        for key in results.get('img_fields', ['img']):
+            if self.keep_ratio:
+                img, scale_factor = mmcv.imrescale(
+                    results[key],
+                    results['scale'],
+                    return_scale=True,
+                    backend=self.backend)
+                # the w_scale and h_scale has minor difference
+                # a real fix should be done in the mmcv.imrescale in the future
+                new_h, new_w = img.shape[:2]
+                h, w = results[key].shape[:2]
+                w_scale = new_w / w
+                h_scale = new_h / h
+            else:
+                img, w_scale, h_scale = mmcv.imresize(
+                    results[key],
+                    results['scale'],
+                    return_scale=True,
+                    backend=self.backend)
+            results[key] = img
+
+            scale_factor = np.array([w_scale, h_scale, w_scale, h_scale],
+                                    dtype=np.float32)
+            results['img_shape'] = img.shape
+            # in case that there is no padding
+            results['pad_shape'] = img.shape
+            results['scale_factor'] = scale_factor
+            results['keep_ratio'] = self.keep_ratio
+
+    def _resize_bboxes(self, results):
+        """Resize bounding boxes with ``results['scale_factor']``."""
+        for key in results.get('bbox_fields', []):
+            bboxes = results[key] * results['scale_factor']
+            if self.bbox_clip_border:
+                img_shape = results['img_shape']
+                bboxes[:, 0::2] = np.clip(bboxes[:, 0::2], 0, img_shape[1])
+                bboxes[:, 1::2] = np.clip(bboxes[:, 1::2], 0, img_shape[0])
+            results[key] = bboxes
+
+    def _resize_cam2img(self, results):
+        # factor: 1.2, 2.4 (w, h)
+        cam2img = np.array(results['cam2img'], dtype=np.float32)
+        cam2img[0, :] = cam2img[0, :] * results['scale_factor'][0]
+        cam2img[1, :] = cam2img[1, :] * results['scale_factor'][1]
+        results['cam2img'] = cam2img.tolist()
+
+    def _resize_center2d(self, results):
+        if 'centers2d' in results.keys():
+            results['centers2d'] = results['centers2d'] * results[
+                'scale_factor'][:2]
+
+    def _resize_depth(self, results):
+
+        cam2img = np.array(results['cam2img'], dtype=np.float32)
+        cam2img_inv = np.linalg.inv(cam2img)
+        cam2img_inv = torch.tensor(cam2img_inv, dtype=torch.float32)
+        pixel_size = torch.norm(
+            torch.stack([cam2img_inv[0, 0], cam2img_inv[1, 1]], dim=-1),
+            dim=-1)
+        depth_factors = 1 / (
+            pixel_size * self.scale_depth_by_focal_lengths_factor)
+        results['depth_factors'] = depth_factors.tolist()
+
+    def __call__(self, results):
+        """Call function to resize images, bounding boxes, masks, semantic
+        segmentation map.
+
+        Args:
+            results (dict): Result dict from loading pipeline.
+
+        Returns:
+            dict: Resized results, 'img_shape', 'pad_shape', 'scale_factor', \
+                'keep_ratio' keys are added into result dict.
+        """
+
+        if 'scale' not in results:
+            if 'scale_factor' in results:
+                img_shape = results['img'].shape[:2]
+                scale_factor = results['scale_factor']
+                assert isinstance(scale_factor, float)
+                results['scale'] = tuple(
+                    [int(x * scale_factor) for x in img_shape][::-1])
+            else:
+                self._random_scale(results)
+        else:
+            if not self.override:
+                assert 'scale_factor' not in results, (
+                    'scale and scale_factor cannot be both set.')
+            else:
+                results.pop('scale')
+                if 'scale_factor' in results:
+                    results.pop('scale_factor')
+                self._random_scale(results)
+
+        self._resize_img(results)
+        self._resize_bboxes(results)
+        if self.scale_cam:
+            self._resize_cam2img(results)
+        self._resize_center2d(results)
+        self._resize_depth(results)
+
+        return results
+
+    def __repr__(self):
+        repr_str = self.__class__.__name__
+        repr_str += f'(img_scale={self.img_scale}, '
+        repr_str += f'multiscale_mode={self.multiscale_mode}, '
+        repr_str += f'ratio_range={self.ratio_range}, '
+        repr_str += f'keep_ratio={self.keep_ratio}, '
+        repr_str += f'bbox_clip_border={self.bbox_clip_border})'
+        return repr_str
+
+
+@PIPELINES.register_module()
+class Mono3DResizeV2:
+    """Resize images & bbox & mask. It's the combination of AffineResize and
+    Mono3DResize.
+
+    This transform resizes the input image to some scale. Bboxes and masks are
+    then resized with the same scale factor. If the input dict contains the key
+    "scale", then the scale in the input dict is used, otherwise the specified
+    scale in the init method is used. If the input dict contains the key
+    "scale_factor" (if MultiScaleFlipAug does not give img_scale but
+    scale_factor), the actual scale will be computed by image shape and
+    scale_factor.
+
+    `img_scale` can either be a tuple (single-scale) or a list of tuple
+    (multi-scale). There are 3 multiscale modes:
+
+    - ``ratio_range is not None``: randomly sample a ratio from the ratio \
+      range and multiply it with the image scale.
+    - ``ratio_range is None`` and ``multiscale_mode == "range"``: randomly \
+      sample a scale from the multiscale range.
+    - ``ratio_range is None`` and ``multiscale_mode == "value"``: randomly \
+      sample a scale from multiple scales.
+
+    Args:
+        img_scale (tuple or list[tuple]): Images scales for resizing.
+        multiscale_mode (str): Either "range" or "value".
+        ratio_range (tuple[float]): (min_ratio, max_ratio)
+        keep_ratio (bool): Whether to keep the aspect ratio when resizing the
+            image.
+        bbox_clip_border (bool, optional): Whether to clip the objects outside
+            the border of the image. In some dataset like MOT17, the gt bboxes
+            are allowed to cross the border of images. Therefore, we don't
+            need to clip the gt bboxes in these cases. Defaults to True.
+        backend (str): Image resize backend, choices are 'cv2' and 'pillow'.
+            These two backends generates slightly different results. Defaults
+            to 'cv2'.
+        override (bool, optional): Whether to override `scale` and
+            `scale_factor` so as to call resize twice. Default False. If True,
+            after the first resizing, the existed `scale` and `scale_factor`
+            will be ignored so the second resizing can be allowed.
+            This option is a work-around for multiple times of resize in DETR.
+            Defaults to False.
+    """
+
+    def __init__(self,
+                 img_scale=None,
+                 multiscale_mode='range',
+                 ratio_range=None,
+                 keep_ratio=True,
+                 bbox_clip_border=True,
+                 backend='cv2',
+                 override=False,
+                 scale_depth_by_focal_lengths_factor=500,
+                 scale_cam=True,
+                 with_aff=False,
+                 down_ratio=4,
+                 img_scale_aff=(1280, 384)):
+        self.scale_depth_by_focal_lengths_factor = \
+            scale_depth_by_focal_lengths_factor
+        if img_scale is None:
+            self.img_scale = None
+        else:
+            if isinstance(img_scale, list):
+                self.img_scale = img_scale
+            else:
+                self.img_scale = [img_scale]
+            assert mmcv.is_list_of(self.img_scale, tuple)
+
+        if ratio_range is not None:
+            # mode 1: given a scale and a range of image ratio
+            assert len(self.img_scale) == 1
+        else:
+            # mode 2: given multiple scales or a range of scales
+            assert multiscale_mode in ['value', 'range']
+
+        self.backend = backend
+        self.multiscale_mode = multiscale_mode
+        self.ratio_range = ratio_range
+        self.keep_ratio = keep_ratio
+        # TODO: refactor the override option in Resize
+        self.override = override
+        self.bbox_clip_border = bbox_clip_border
+
+        self.scale_cam = scale_cam
+        self.with_aff = with_aff
+        self.down_ratio = down_ratio
+        self.img_scale_aff = img_scale_aff
+
+    @staticmethod
+    def random_select(img_scales):
+        """Randomly select an img_scale from given candidates.
+
+        Args:
+            img_scales (list[tuple]): Images scales for selection.
+
+        Returns:
+            (tuple, int): Returns a tuple ``(img_scale, scale_dix)``, \
+                where ``img_scale`` is the selected image scale and \
+                ``scale_idx`` is the selected index in the given candidates.
+        """
+
+        assert mmcv.is_list_of(img_scales, tuple)
+        scale_idx = np.random.randint(len(img_scales))
+        img_scale = img_scales[scale_idx]  # will get w, h
+        return img_scale, scale_idx
+
+    def _random_scale(self, results):
+        """Randomly sample an img_scale according to ``ratio_range`` and
+        ``multiscale_mode``.
+
+        If ``ratio_range`` is specified, a ratio will be sampled and be
+        multiplied with ``img_scale``.
+        If multiple scales are specified by ``img_scale``, a scale will be
+        sampled according to ``multiscale_mode``.
+        Otherwise, single scale will be used.
+
+        Args:
+            results (dict): Result dict from :obj:`dataset`.
+
+        Returns:
+            dict: Two new keys 'scale` and 'scale_idx` are added into \
+                ``results``, which would be used by subsequent pipelines.
+        """
+
+        scale, scale_idx = self.random_select(self.img_scale)
+
+        results['scale'] = scale
+        results['scale_idx'] = scale_idx
+
+    def _resize_img(self, results):
+        """Resize images with ``results['scale']``."""
+        for key in results.get('img_fields', ['img']):
+            if self.keep_ratio:
+                img, scale_factor = mmcv.imrescale(
+                    results[key],
+                    results['scale'],
+                    return_scale=True,
+                    backend=self.backend)
+                # the w_scale and h_scale has minor difference
+                # a real fix should be done in the mmcv.imrescale in the future
+                new_h, new_w = img.shape[:2]
+                h, w = results[key].shape[:2]
+                w_scale = new_w / w
+                h_scale = new_h / h
+            else:
+                img, w_scale, h_scale = mmcv.imresize(
+                    results[key],
+                    results['scale'],
+                    return_scale=True,
+                    backend=self.backend)
+
+            results[key] = img
+
+            scale_factor = np.array([w_scale, h_scale, w_scale, h_scale],
+                                    dtype=np.float32)
+
+            results['img_shape'] = img.shape
+            # in case that there is no padding
+            results['pad_shape'] = img.shape
+            results['scale_factor'] = scale_factor
+            results['keep_ratio'] = self.keep_ratio
+
+    def _resize_bboxes(self, results):
+        """Resize bounding boxes with ``results['scale_factor']``."""
+        for key in results.get('bbox_fields', []):
+            bboxes = results[key] * results['scale_factor']
+            if self.bbox_clip_border:
+                img_shape = results['img_shape']
+                bboxes[:, 0::2] = np.clip(bboxes[:, 0::2], 0, img_shape[1])
+                bboxes[:, 1::2] = np.clip(bboxes[:, 1::2], 0, img_shape[0])
+            results[key] = bboxes
+
+    def _resize_cam2img(self, results):
+        # factor: 1.2, 2.4 (w, h)
+        cam2img = np.array(results['cam2img'], dtype=np.float32)
+        cam2img[0, :] = cam2img[0, :] * results['scale_factor'][0]
+        cam2img[1, :] = cam2img[1, :] * results['scale_factor'][1]
+        results['cam2img'] = cam2img.tolist()
+
+    def _resize_center2d(self, results):
+        if 'centers2d' in results.keys():
+            results['centers2d'] = results['centers2d'] * results[
+                'scale_factor'][:2]
+
+    def _resize_depth(self, results):
+
+        cam2img = np.array(results['cam2img'], dtype=np.float32)
+        cam2img_inv = np.linalg.inv(cam2img)
+        cam2img_inv = torch.tensor(cam2img_inv, dtype=torch.float32)
+        pixel_size = torch.norm(
+            torch.stack([cam2img_inv[0, 0], cam2img_inv[1, 1]], dim=-1),
+            dim=-1)
+        depth_factors = 1 / (
+            pixel_size * self.scale_depth_by_focal_lengths_factor)
+
+        # if 'depths' in results.keys():
+        #     results['depths'] = results['depths'] / depth_factors
+
+        results['depth_factors'] = depth_factors.tolist()
+
+    def _get_ref_point(self, ref_point1, ref_point2):
+        """Get reference point to calculate affine transform matrix.
+
+        While using opencv to calculate the affine matrix, we need at least
+        three corresponding points separately on original image and target
+        image. Here we use two points to get the the third reference point.
+        """
+        d = ref_point1 - ref_point2
+        ref_point3 = ref_point2 + np.array([-d[1], d[0]])
+        return ref_point3
+
+    def _get_transform_matrix(self, center, scale, output_scale):
+        """Get affine transform matrix.
+
+        Args:
+            center (tuple): Center of current image.
+            scale (tuple): Scale of current image.
+            output_scale (tuple[float]): The transform target image scales.
+
+        Returns:
+            np.ndarray: Affine transform matrix.
+        """
+        # TODO: further add rot and shift here.
+        src_w = scale[0]
+        dst_w = output_scale[0]
+        dst_h = output_scale[1]
+
+        src_dir = np.array([0, src_w * -0.5])
+        dst_dir = np.array([0, dst_w * -0.5])
+
+        src = np.zeros((3, 2), dtype=np.float32)
+        dst = np.zeros((3, 2), dtype=np.float32)
+        src[0, :] = center
+        src[1, :] = center + src_dir
+        dst[0, :] = np.array([dst_w * 0.5, dst_h * 0.5])
+        dst[1, :] = np.array([dst_w * 0.5, dst_h * 0.5]) + dst_dir
+
+        src[2, :] = self._get_ref_point(src[0, :], src[1, :])
+        dst[2, :] = self._get_ref_point(dst[0, :], dst[1, :])
+
+        get_matrix = cv2.getAffineTransform(src, dst)
+
+        matrix = np.concatenate((get_matrix, [[0., 0., 1.]]))
+
+        return matrix.astype(np.float32)
+
+    def _affine_bboxes(self, results, matrix):
+        """Affine transform bboxes to input image.
+
+        Args:
+            results (dict): Result dict from loading pipeline.
+            matrix (np.ndarray): Matrix transforming original
+                image to the network input image size.
+                shape: (3, 3)
+        """
+
+        for key in results.get('bbox_fields', []):
+            bboxes = results[key]
+            bboxes[:, :2] = self._affine_transform(bboxes[:, :2], matrix)
+            bboxes[:, 2:] = self._affine_transform(bboxes[:, 2:], matrix)
+            if self.bbox_clip_border:
+                bboxes[:,
+                       [0, 2]] = bboxes[:,
+                                        [0, 2]].clip(0,
+                                                     self.img_scale_aff[0] - 1)
+                bboxes[:,
+                       [1, 3]] = bboxes[:,
+                                        [1, 3]].clip(0,
+                                                     self.img_scale_aff[1] - 1)
+            results[key] = bboxes
+
+    def _affine_transform(self, points, matrix):
+        """Affine transform bbox points to input image.
+
+        Args:
+            points (np.ndarray): Points to be transformed.
+                shape: (N, 2)
+            matrix (np.ndarray): Affine transform matrix.
+                shape: (3, 3)
+
+        Returns:
+            np.ndarray: Transformed points.
+        """
+        num_points = points.shape[0]
+        hom_points_2d = np.concatenate((points, np.ones((num_points, 1))),
+                                       axis=1)
+        hom_points_2d = hom_points_2d.T
+        affined_points = np.matmul(matrix, hom_points_2d).T
+        return affined_points[:, :2]
+
+    def __call__(self, results):
+        """Call function to resize images, bounding boxes, masks, semantic
+        segmentation map.
+
+        Args:
+            results (dict): Result dict from loading pipeline.
+
+        Returns:
+            dict: Resized results, 'img_shape', 'pad_shape', 'scale_factor', \
+                'keep_ratio' keys are added into result dict.
+        """
+
+        if self.with_aff:
+            img = results['img']
+            if results['affine_aug'] is False:
+                # w/o aff
+                height, width = img.shape[:2]
+                center = np.array([width / 2, height / 2], dtype=np.float32)
+                size = np.array([width, height], dtype=np.float32)
+            else:
+                # w aff
+                # only for cls branch
+                center = results['center']
+                size = results['size']
+                trans_affine = self._get_transform_matrix(
+                    center, size, self.img_scale_aff)
+                img = cv2.warpAffine(img, trans_affine[:2, :],
+                                     self.img_scale_aff)
+                self._affine_bboxes(results, trans_affine)
+
+                # copy from aff
+                if 'centers2d' in results:
+                    centers2d = self._affine_transform(results['centers2d'],
+                                                       trans_affine)
+                    valid_index = (centers2d[:, 0] > 0) & (
+                        centers2d[:, 0] <
+                        self.img_scale_aff[0]) & (centers2d[:, 1] > 0) & (
+                            centers2d[:, 1] < self.img_scale_aff[1])
+                    results['centers2d'] = centers2d[valid_index]
+
+                    for key in results.get('bbox_fields', []):
+                        if key in ['gt_bboxes']:
+                            results[key] = results[key][valid_index]
+                            if 'gt_labels' in results:
+                                results['gt_labels'] = results['gt_labels'][
+                                    valid_index]
+                            if 'gt_masks' in results:
+                                raise NotImplementedError(
+                                    'AffineResize only supports bbox.')
+
+                    for key in results.get('bbox3d_fields', []):
+                        if key in ['gt_bboxes_3d']:
+                            results[key].tensor = results[key].tensor[
+                                valid_index]
+                            if 'gt_labels_3d' in results:
+                                results['gt_labels_3d'] = results[
+                                    'gt_labels_3d'][valid_index]
+
+                    results['depths'] = results['depths'][valid_index]
+
+                results['img'] = img
+                results['img_shape'] = img.shape
+                results['pad_shape'] = img.shape
+
+        self._random_scale(results)
+        self._resize_img(results)
+        if self.scale_cam:
+            self._resize_cam2img(results)
+        self._resize_center2d(results)
+        self._resize_depth(results)
+        self._resize_bboxes(results)
+
+        trans_mat = np.eye(3)
+        trans_mat[0, 0] = 1 / self.down_ratio
+        trans_mat[1, 1] = 1 / self.down_ratio
+        results['trans_mat'] = trans_mat
+
+        # for cls branch:
+        # aff and resize to a same resolution
+        # multi-scale
+
+        # for reg branch:
+        # w/o aff trans
+        # multi-scale
+
+        return results
+
+    def __repr__(self):
+        repr_str = self.__class__.__name__
+        repr_str += f'(img_scale={self.img_scale}, '
+        repr_str += f'multiscale_mode={self.multiscale_mode}, '
+        repr_str += f'ratio_range={self.ratio_range}, '
+        repr_str += f'keep_ratio={self.keep_ratio}, '
+        repr_str += f'bbox_clip_border={self.bbox_clip_border})'
+        return repr_str
+
+
+@PIPELINES.register_module()
+class CenterFilter:
+    """We find there are centers out of image range, so use this function to
+    filter them."""
+
+    def __call__(self, results):
+        """Call function to resize images, bounding boxes, masks, semantic
+        segmentation map.
+
+        Args:
+            results (dict): Result dict from loading pipeline.
+
+        Returns:
+            dict: Resized results, 'img_shape', 'pad_shape', 'scale_factor', \
+                'keep_ratio' keys are added into result dict.
+        """
+
+        if 'centers2d' in results:
+            centers2d = results['centers2d']
+            img_shape = results['img_shape']
+
+            valid_index = (centers2d[:, 0] > 0) & (
+                centers2d[:, 0] < img_shape[1]) & (centers2d[:, 1] > 0) & (
+                    centers2d[:, 1] < img_shape[0])
+            results['centers2d'] = centers2d[valid_index]
+
+            for key in results.get('bbox_fields', []):
+                if key in ['gt_bboxes']:
+                    results[key] = results[key][valid_index]
+                    if 'gt_labels' in results:
+                        results['gt_labels'] = results['gt_labels'][
+                            valid_index]
+                    if 'gt_masks' in results:
+                        raise NotImplementedError(
+                            'AffineResize only supports bbox.')
+
+            for key in results.get('bbox3d_fields', []):
+                if key in ['gt_bboxes_3d']:
+                    results[key].tensor = results[key].tensor[valid_index]
+                    if 'gt_labels_3d' in results:
+                        results['gt_labels_3d'] = results['gt_labels_3d'][
+                            valid_index]
+
+            results['depths'] = results['depths'][valid_index]
+
+        return results
+
+    def __repr__(self):
+        repr_str = self.__class__.__name__
+        return repr_str
+
+
+@PIPELINES.register_module()
+class CenterDLE:
+    """Handle truncated objects in image edges."""
+
+    def __call__(self, results):
+        """Call function to resize images, bounding boxes, masks, semantic
+        segmentation map.
+
+        Args:
+            results (dict): Result dict from loading pipeline.
+
+        Returns:
+            dict: Resized results, 'img_shape', 'pad_shape', 'scale_factor', \
+                'keep_ratio' keys are added into result dict.
+        """
+
+        if 'centers2d' in results:
+            centers2d = results['centers2d']
+            img_shape = results['img_shape']
+
+            # valid_index = (centers2d[:, 0] > 0) & (centers2d[:, 0] <
+            # img_shape[1]) & (centers2d[:, 1] > 0) &
+            # (centers2d[:, 1] < img_shape[0])
+            invalid_index = (centers2d[:, 0] < 0) | (
+                centers2d[:, 0] > img_shape[1]) | (centers2d[:, 1] < 0) | (
+                    centers2d[:, 1] > img_shape[0])
+
+            invalid_index = invalid_index.tolist()
+            invalid_index = [i for i, x in enumerate(invalid_index) if x]
+
+            for index in invalid_index:
+                out_center = results['centers2d'][index]
+                if out_center[0] < 0:
+                    bbox = results['gt_bboxes'][index]
+                    inner_center = [
+                        bbox[0] + bbox[3] * 0.5, bbox[1] + bbox[1] * 0.5
+                    ]
+                    new_center = [
+                        0,
+                        (-(out_center[0] / (inner_center[0] - out_center[0])) *
+                         (inner_center[1] - out_center[1])) + out_center[1]
+                    ]
+                    results['centers2d'][index] = new_center
+                elif out_center[0] > img_shape[1]:
+                    bbox = results['gt_bboxes'][index]
+                    inner_center = [
+                        bbox[0] + bbox[3] * 0.5, bbox[1] + bbox[1] * 0.5
+                    ]
+                    new_center = [
+                        img_shape[1],
+                        (((img_shape[1] - out_center[0]) /
+                          (inner_center[0] - out_center[0])) *
+                         (inner_center[1] - out_center[1])) + out_center[1]
+                    ]
+                    results['centers2d'][index] = new_center
+
+        return results
+
+    def __repr__(self):
+        repr_str = self.__class__.__name__
         return repr_str

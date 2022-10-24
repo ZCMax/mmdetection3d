@@ -8,15 +8,16 @@ from .loading import (LoadAnnotations3D, LoadImageFromFileMono3D,
                       NormalizePointsColor, PointSegClassMapping)
 from .test_time_aug import MultiScaleFlipAug3D
 # yapf: disable
-from .transforms_3d import (AffineResize, BackgroundPointsFilter,
-                            GlobalAlignment, GlobalRotScaleTrans,
+from .transforms_3d import (AffineResize, BackgroundPointsFilter, CenterDLE,
+                            CenterFilter, GlobalAlignment, GlobalRotScaleTrans,
                             IndoorPatchPointSample, IndoorPointSample,
-                            MultiViewWrapper, ObjectNameFilter, ObjectNoise,
-                            ObjectRangeFilter, ObjectSample, PointSample,
-                            PointShuffle, PointsRangeFilter,
-                            RandomDropPointsColor, RandomFlip3D,
-                            RandomJitterPoints, RandomRotate, RandomShiftScale,
-                            RangeLimitedRandomCrop, VoxelBasedPointSampler)
+                            Mono3DResize, Mono3DResizeV2, MultiViewWrapper,
+                            ObjectNameFilter, ObjectNoise, ObjectRangeFilter,
+                            ObjectSample, PointSample, PointShuffle,
+                            PointsRangeFilter, RandomDropPointsColor,
+                            RandomFlip3D, RandomJitterPoints, RandomRotate,
+                            RandomShiftScale, RangeLimitedRandomCrop,
+                            VoxelBasedPointSampler)
 
 __all__ = [
     'ObjectSample', 'RandomFlip3D', 'ObjectNoise', 'GlobalRotScaleTrans',
@@ -30,5 +31,6 @@ __all__ = [
     'LoadImageFromFileMono3D', 'ObjectNameFilter', 'RandomDropPointsColor',
     'RandomJitterPoints', 'AffineResize', 'RandomShiftScale',
     'LoadPointsFromDict', 'MultiViewWrapper', 'RandomRotate',
-    'RangeLimitedRandomCrop'
+    'RangeLimitedRandomCrop', 'Mono3DResize', 'Mono3DResizeV2',
+    'CenterFilter', 'CenterDLE'
 ]

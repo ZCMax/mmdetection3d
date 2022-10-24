@@ -17,11 +17,20 @@ class SMOKECoder(BaseBBoxCoder):
         code_size (int): The dimension of boxes to be encoded.
     """
 
-    def __init__(self, base_depth, base_dims, code_size):
+    def __init__(self,
+                 base_depth,
+                 base_dims,
+                 code_size,
+                 rescale_depth=False,
+                 num_classes=3,
+                 use_base=True):
         super(SMOKECoder, self).__init__()
         self.base_depth = base_depth
         self.base_dims = base_dims
         self.bbox_code_size = code_size
+        self.rescale_depth = rescale_depth
+        self.num_classes = num_classes
+        self.use_base = use_base
 
     def encode(self, locations, dimensions, orientations, input_metas):
         """Encode CameraInstance3DBoxes by locations, dimensions, orientations.
@@ -55,7 +64,8 @@ class SMOKECoder(BaseBBoxCoder):
                labels,
                cam2imgs,
                trans_mats,
-               locations=None):
+               locations=None,
+               depth_factors=None):
         """Decode regression into locations, dimensions, orientations.
 
         Args:
@@ -90,7 +100,7 @@ class SMOKECoder(BaseBBoxCoder):
         centers2d_offsets = reg[:, 1:3]
         dimensions_offsets = reg[:, 3:6]
         orientations = reg[:, 6:8]
-        depths = self._decode_depth(depth_offsets)
+        depths = self._decode_depth(depth_offsets, depth_factors)
         # get the 3D Bounding box's center location.
         pred_locations = self._decode_location(points, centers2d_offsets,
                                                depths, cam2imgs, trans_mats)
@@ -104,11 +114,16 @@ class SMOKECoder(BaseBBoxCoder):
 
         return pred_locations, pred_dimensions, pred_orientations
 
-    def _decode_depth(self, depth_offsets):
+    def _decode_depth(self, depth_offsets, depth_factors=None):
         """Transform depth offset to depth."""
-        base_depth = depth_offsets.new_tensor(self.base_depth)
-        depths = depth_offsets * base_depth[1] + base_depth[0]
+        if self.use_base:
+            base_depth = depth_offsets.new_tensor(self.base_depth)
+            depths = depth_offsets * base_depth[1] + base_depth[0]
+        else:
+            depths = depth_offsets
 
+        if self.rescale_depth:
+            depths = depths * depth_factors
         return depths
 
     def _decode_location(self, points, centers2d_offsets, depths, cam2imgs,
@@ -162,9 +177,16 @@ class SMOKECoder(BaseBBoxCoder):
                 shape: (N, 3)
         """
         labels = labels.flatten().long()
-        base_dims = dims_offset.new_tensor(self.base_dims)
-        dims_select = base_dims[labels, :]
-        dimensions = dims_offset.exp() * dims_select
+        if self.num_classes == 1:
+            base_dims = dims_offset.new_tensor(self.base_dims).unsqueeze(dim=0)
+        else:
+            base_dims = dims_offset.new_tensor(self.base_dims)
+
+        if self.use_base:
+            dims_select = base_dims[labels, :]
+            dimensions = dims_offset.exp() * dims_select
+        else:
+            dimensions = dims_offset.exp()
 
         return dimensions
 

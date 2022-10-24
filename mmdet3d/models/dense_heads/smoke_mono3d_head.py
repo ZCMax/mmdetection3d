@@ -58,6 +58,7 @@ class SMOKEMono3DHead(AnchorFreeMono3DHead):
                  loss_attr=None,
                  norm_cfg=dict(type='GN', num_groups=32, requires_grad=True),
                  init_cfg=None,
+                 rescale_depth=False,
                  **kwargs):
         super().__init__(
             num_classes,
@@ -72,6 +73,7 @@ class SMOKEMono3DHead(AnchorFreeMono3DHead):
         self.dim_channel = dim_channel
         self.ori_channel = ori_channel
         self.bbox_coder = build_bbox_coder(bbox_coder)
+        self.rescale_depth = rescale_depth
 
     def forward(self, feats):
         """Forward features from the upstream network.
@@ -214,8 +216,19 @@ class SMOKEMono3DHead(AnchorFreeMono3DHead):
         points = torch.cat([topk_xs.view(-1, 1),
                             topk_ys.view(-1, 1).float()],
                            dim=1)
+
+        depth_factors = None
+        if self.rescale_depth:
+            depth_factors = regression.new_tensor(
+                img_metas[0]['depth_factors'])
+
         locations, dimensions, orientations = self.bbox_coder.decode(
-            regression, points, batch_topk_labels, cam2imgs, trans_mats)
+            regression,
+            points,
+            batch_topk_labels,
+            cam2imgs,
+            trans_mats,
+            depth_factors=depth_factors)
 
         batch_bboxes = torch.cat((locations, dimensions, orientations), dim=1)
         batch_bboxes = batch_bboxes.view(bs, -1, self.bbox_code_size)
@@ -262,13 +275,29 @@ class SMOKEMono3DHead(AnchorFreeMono3DHead):
             gt_locations.new_tensor(img_meta['trans_mat'])
             for img_meta in img_metas
         ])
+
         centers2d_inds = centers2d[:, 1] * w + centers2d[:, 0]
         centers2d_inds = centers2d_inds.view(batch, -1)
+
+        depth_factors = None
+        if self.rescale_depth:
+            depth_factors = torch.cat([
+                gt_locations.new_tensor([img_meta['depth_factors']] *
+                                        centers2d_inds.shape[1])
+                for img_meta in img_metas
+            ])  # 8, 10
+
         pred_regression = transpose_and_gather_feat(pred_reg, centers2d_inds)
         pred_regression_pois = pred_regression.view(-1, channel)
+
         locations, dimensions, orientations = self.bbox_coder.decode(
-            pred_regression_pois, centers2d, labels3d, cam2imgs, trans_mats,
-            gt_locations)
+            pred_regression_pois,
+            centers2d,
+            labels3d,
+            cam2imgs,
+            trans_mats,
+            gt_locations,
+            depth_factors=depth_factors)
 
         locations, dimensions, orientations = locations[indices], dimensions[
             indices], orientations[indices]
@@ -343,10 +372,14 @@ class SMOKEMono3DHead(AnchorFreeMono3DHead):
         img_h, img_w = img_shape[:2]
         bs, _, feat_h, feat_w = feat_shape
 
-        width_ratio = float(feat_w / img_w)  # 1/4
-        height_ratio = float(feat_h / img_h)  # 1/4
+        # width_ratio = float(feat_w / img_w)  # 1/4
+        # height_ratio = float(feat_h / img_h)  # 1/4
 
-        assert width_ratio == height_ratio
+        # assert width_ratio == height_ratio
+
+        # # default
+        width_ratio = 1 / 4
+        height_ratio = 1 / 4
 
         center_heatmap_target = gt_bboxes[-1].new_zeros(
             [bs, self.num_classes, feat_h, feat_w])
@@ -470,7 +503,7 @@ class SMOKEMono3DHead(AnchorFreeMono3DHead):
             dict[str, Tensor]: A dictionary of loss components.
         """
         assert len(cls_scores) == len(bbox_preds) == 1
-        assert attr_labels is None
+        # assert attr_labels is None
         assert gt_bboxes_ignore is None
         center2d_heatmap = cls_scores[0]
         pred_reg = bbox_preds[0]
