@@ -3,7 +3,8 @@
 
 Example:
     python tools/dataset_converters/update_infos_to_v2.py
-        --pkl ./data/kitti/kitti_infos_train.pkl
+        --dataset kitti
+        --pkl-path ./data/kitti/kitti_infos_train.pkl
         --out-dir ./kitti_v2/
 """
 
@@ -16,8 +17,9 @@ import mmengine
 import numpy as np
 from nuscenes.nuscenes import NuScenes
 
-from mmdet3d.datasets.convert_utils import (convert_annos, get_2d_boxes,
-                                            get_waymo_2d_boxes)
+from mmdet3d.datasets.convert_utils import (convert_annos,
+                                            get_kitti_style_2d_boxes,
+                                            get_nuscenes_2d_boxes)
 from mmdet3d.datasets.utils import convert_quaternion_to_matrix
 from mmdet3d.structures import points_cam2img
 
@@ -194,7 +196,7 @@ def clear_data_info_unused_keys(data_info):
     empty_flag = True
     for key in keys:
         # we allow no annotations in datainfo
-        if key == 'instances':
+        if key in ['instances', 'cam_sync_instances', 'cam_instances']:
             empty_flag = False
             continue
         if isinstance(data_info[key], list):
@@ -217,7 +219,7 @@ def clear_data_info_unused_keys(data_info):
     return data_info, empty_flag
 
 
-def generate_camera_instances(info, nusc):
+def generate_nuscenes_camera_instances(info, nusc):
 
     # get bbox annotations for camera
     camera_types = [
@@ -234,7 +236,7 @@ def generate_camera_instances(info, nusc):
     for cam in camera_types:
         cam_info = info['cams'][cam]
         # list[dict]
-        ann_infos = get_2d_boxes(
+        ann_infos = get_nuscenes_2d_boxes(
             nusc,
             cam_info['sample_data_token'],
             visibilities=['', '1', '2', '3', '4'])
@@ -262,10 +264,6 @@ def update_nuscenes_infos(pkl_path, out_dir):
         'CLASSES':
         ('car', 'truck', 'trailer', 'bus', 'construction_vehicle', 'bicycle',
          'motorcycle', 'pedestrian', 'traffic_cone', 'barrier'),
-        'DATASET':
-        'Nuscenes',
-        'version':
-        data_list['metadata']['version']
     }
     nusc = NuScenes(
         version=data_list['metadata']['version'],
@@ -283,6 +281,8 @@ def update_nuscenes_infos(pkl_path, out_dir):
         temp_data_info['ego2global'] = convert_quaternion_to_matrix(
             ori_info_dict['ego2global_rotation'],
             ori_info_dict['ego2global_translation'])
+        temp_data_info['lidar_points']['num_pts_feats'] = ori_info_dict.get(
+            'num_features', 5)
         temp_data_info['lidar_points']['lidar_path'] = ori_info_dict[
             'lidar_path'].split('/')[-1]
         temp_data_info['lidar_points'][
@@ -355,7 +355,7 @@ def update_nuscenes_infos(pkl_path, out_dir):
             empty_instance['bbox_3d_isvalid'] = ori_info_dict['valid_flag'][i]
             empty_instance = clear_instance_unused_keys(empty_instance)
             temp_data_info['instances'].append(empty_instance)
-        temp_data_info['cam_instances'] = generate_camera_instances(
+        temp_data_info['cam_instances'] = generate_nuscenes_camera_instances(
             ori_info_dict, nusc)
         temp_data_info, _ = clear_data_info_unused_keys(temp_data_info)
         converted_list.append(temp_data_info)
@@ -363,7 +363,16 @@ def update_nuscenes_infos(pkl_path, out_dir):
     out_path = osp.join(out_dir, pkl_name)
     print(f'Writing to output file: {out_path}.')
     print(f'ignore classes: {ignore_class_name}')
-    converted_data_info = dict(metainfo=METAINFO, data_list=converted_list)
+
+    metainfo = dict()
+    metainfo['categories'] = {k: i for i, k in enumerate(METAINFO['CLASSES'])}
+    if ignore_class_name:
+        for ignore_class in ignore_class_name:
+            metainfo['categories'][ignore_class] = -1
+    metainfo['dataset'] = 'nuscenes'
+    metainfo['version'] = data_list['metadata']['version']
+    metainfo['info_version'] = '1.1'
+    converted_data_info = dict(metainfo=metainfo, data_list=converted_list)
 
     mmengine.dump(converted_data_info, out_path, 'pkl')
 
@@ -485,14 +494,24 @@ def update_kitti_infos(pkl_path, out_dir):
             empty_instance = clear_instance_unused_keys(empty_instance)
             instance_list.append(empty_instance)
         temp_data_info['instances'] = instance_list
+        cam_instances = generate_kitti_camera_instances(ori_info_dict)
+        temp_data_info['cam_instances'] = cam_instances
         temp_data_info, _ = clear_data_info_unused_keys(temp_data_info)
         converted_list.append(temp_data_info)
     pkl_name = pkl_path.split('/')[-1]
     out_path = osp.join(out_dir, pkl_name)
     print(f'Writing to output file: {out_path}.')
     print(f'ignore classes: {ignore_class_name}')
-    converted_data_info = dict(
-        metainfo={'DATASET': 'KITTI'}, data_list=converted_list)
+
+    # dataset metainfo
+    metainfo = dict()
+    metainfo['categories'] = {k: i for i, k in enumerate(METAINFO['CLASSES'])}
+    if ignore_class_name:
+        for ignore_class in ignore_class_name:
+            metainfo['categories'][ignore_class] = -1
+    metainfo['dataset'] = 'kitti'
+    metainfo['info_version'] = '1.1'
+    converted_data_info = dict(metainfo=metainfo, data_list=converted_list)
 
     mmengine.dump(converted_data_info, out_path, 'pkl')
 
@@ -510,7 +529,7 @@ def update_s3dis_infos(pkl_path, out_dir):
     converted_list = []
     for i, ori_info_dict in enumerate(mmengine.track_iter_progress(data_list)):
         temp_data_info = get_empty_standard_data_info()
-        temp_data_info['sample_id'] = i
+        temp_data_info['sample_idx'] = i
         temp_data_info['lidar_points']['num_pts_feats'] = ori_info_dict[
             'point_cloud']['num_features']
         temp_data_info['lidar_points']['lidar_path'] = ori_info_dict[
@@ -552,8 +571,17 @@ def update_s3dis_infos(pkl_path, out_dir):
     out_path = osp.join(out_dir, pkl_name)
     print(f'Writing to output file: {out_path}.')
     print(f'ignore classes: {ignore_class_name}')
-    converted_data_info = dict(
-        metainfo={'DATASET': 'S3DIS'}, data_list=converted_list)
+
+    # dataset metainfo
+    metainfo = dict()
+    metainfo['categories'] = {k: i for i, k in enumerate(METAINFO['CLASSES'])}
+    if ignore_class_name:
+        for ignore_class in ignore_class_name:
+            metainfo['categories'][ignore_class] = -1
+    metainfo['dataset'] = 's3dis'
+    metainfo['info_version'] = '1.1'
+
+    converted_data_info = dict(metainfo=metainfo, data_list=converted_list)
 
     mmengine.dump(converted_data_info, out_path, 'pkl')
 
@@ -617,8 +645,17 @@ def update_scannet_infos(pkl_path, out_dir):
     out_path = osp.join(out_dir, pkl_name)
     print(f'Writing to output file: {out_path}.')
     print(f'ignore classes: {ignore_class_name}')
-    converted_data_info = dict(
-        metainfo={'DATASET': 'SCANNET'}, data_list=converted_list)
+
+    # dataset metainfo
+    metainfo = dict()
+    metainfo['categories'] = {k: i for i, k in enumerate(METAINFO['CLASSES'])}
+    if ignore_class_name:
+        for ignore_class in ignore_class_name:
+            metainfo['categories'][ignore_class] = -1
+    metainfo['dataset'] = 'scannet'
+    metainfo['info_version'] = '1.1'
+
+    converted_data_info = dict(metainfo=metainfo, data_list=converted_list)
 
     mmengine.dump(converted_data_info, out_path, 'pkl')
 
@@ -686,8 +723,17 @@ def update_sunrgbd_infos(pkl_path, out_dir):
     out_path = osp.join(out_dir, pkl_name)
     print(f'Writing to output file: {out_path}.')
     print(f'ignore classes: {ignore_class_name}')
-    converted_data_info = dict(
-        metainfo={'DATASET': 'SUNRGBD'}, data_list=converted_list)
+
+    # dataset metainfo
+    metainfo = dict()
+    metainfo['categories'] = {k: i for i, k in enumerate(METAINFO['CLASSES'])}
+    if ignore_class_name:
+        for ignore_class in ignore_class_name:
+            metainfo['categories'][ignore_class] = -1
+    metainfo['dataset'] = 'sunrgbd'
+    metainfo['info_version'] = '1.1'
+
+    converted_data_info = dict(metainfo=metainfo, data_list=converted_list)
 
     mmengine.dump(converted_data_info, out_path, 'pkl')
 
@@ -703,10 +749,6 @@ def update_lyft_infos(pkl_path, out_dir):
         'CLASSES':
         ('car', 'truck', 'bus', 'emergency_vehicle', 'other_vehicle',
          'motorcycle', 'bicycle', 'pedestrian', 'animal'),
-        'DATASET':
-        'Nuscenes',
-        'version':
-        data_list['metadata']['version']
     }
     print('Start updating:')
     converted_list = []
@@ -791,7 +833,16 @@ def update_lyft_infos(pkl_path, out_dir):
     out_path = osp.join(out_dir, pkl_name)
     print(f'Writing to output file: {out_path}.')
     print(f'ignore classes: {ignore_class_name}')
-    converted_data_info = dict(metainfo=METAINFO, data_list=converted_list)
+
+    metainfo = dict()
+    metainfo['categories'] = {k: i for i, k in enumerate(METAINFO['CLASSES'])}
+    if ignore_class_name:
+        for ignore_class in ignore_class_name:
+            metainfo['categories'][ignore_class] = -1
+    metainfo['dataset'] = 'lyft'
+    metainfo['version'] = data_list['metadata']['version']
+    metainfo['info_version'] = '1.1'
+    converted_data_info = dict(metainfo=metainfo, data_list=converted_list)
 
     mmengine.dump(converted_data_info, out_path, 'pkl')
 
@@ -825,7 +876,7 @@ def update_waymo_infos(pkl_path, out_dir):
 
         if 'plane' in ori_info_dict:
             temp_data_info['plane'] = ori_info_dict['plane']
-        temp_data_info['sample_id'] = ori_info_dict['image']['image_idx']
+        temp_data_info['sample_idx'] = ori_info_dict['image']['image_idx']
 
         # calib matrix
         for cam_idx, cam_key in enumerate(camera_types):
@@ -989,10 +1040,32 @@ def update_waymo_infos(pkl_path, out_dir):
     out_path = osp.join(out_dir, pkl_name)
     print(f'Writing to output file: {out_path}.')
     print(f'ignore classes: {ignore_class_name}')
-    converted_data_info = dict(
-        metainfo={'DATASET': 'Waymo'}, data_list=converted_list)
+
+    # dataset metainfo
+    metainfo = dict()
+    metainfo['categories'] = {k: i for i, k in enumerate(METAINFO['CLASSES'])}
+    if ignore_class_name:
+        for ignore_class in ignore_class_name:
+            metainfo['categories'][ignore_class] = -1
+    metainfo['dataset'] = 'waymo'
+    metainfo['version'] = '1.2'
+    metainfo['info_version'] = '1.1'
+
+    converted_data_info = dict(metainfo=metainfo, data_list=converted_list)
 
     mmengine.dump(converted_data_info, out_path, 'pkl')
+
+
+def generate_kitti_camera_instances(ori_info_dict):
+
+    cam_key = 'CAM2'
+    empty_camera_instances = get_empty_multicamera_instances([cam_key])
+    annos = copy.deepcopy(ori_info_dict['annos'])
+    ann_infos = get_kitti_style_2d_boxes(
+        ori_info_dict, occluded=[0, 1, 2, 3], annos=annos)
+    empty_camera_instances[cam_key] = ann_infos
+
+    return empty_camera_instances
 
 
 def generate_waymo_camera_instances(ori_info_dict, cam_keys):
@@ -1004,8 +1077,8 @@ def generate_waymo_camera_instances(ori_info_dict, cam_keys):
         if cam_idx != 0:
             annos = convert_annos(ori_info_dict, cam_idx)
 
-        ann_infos = get_waymo_2d_boxes(
-            ori_info_dict, cam_idx, occluded=[0], annos=annos)
+        ann_infos = get_kitti_style_2d_boxes(
+            ori_info_dict, cam_idx, occluded=[0], annos=annos, dataset='waymo')
 
         empty_multicamera_instances[cam_key] = ann_infos
     return empty_multicamera_instances
@@ -1017,7 +1090,7 @@ def parse_args():
     parser.add_argument(
         '--dataset', type=str, default='kitti', help='name of dataset')
     parser.add_argument(
-        '--pkl',
+        '--pkl-path',
         type=str,
         default='./data/kitti/kitti_infos_train.pkl ',
         help='specify the root dir of dataset')

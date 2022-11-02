@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import copy
 import os
-import warnings
+from typing import List, Optional
 
 import mmengine
 import numpy as np
@@ -16,18 +16,18 @@ class BatchSampler:
 
     Args:
         sample_list (list[dict]): List of samples.
-        name (str, optional): The category of samples. Default: None.
-        epoch (int, optional): Sampling epoch. Default: None.
-        shuffle (bool, optional): Whether to shuffle indices. Default: False.
-        drop_reminder (bool, optional): Drop reminder. Default: False.
+        name (str, optional): The category of samples. Defaults to None.
+        epoch (int, optional): Sampling epoch. Defaults to None.
+        shuffle (bool): Whether to shuffle indices. Defaults to False.
+        drop_reminder (bool): Drop reminder. Defaults to False.
     """
 
     def __init__(self,
-                 sampled_list,
-                 name=None,
-                 epoch=None,
-                 shuffle=True,
-                 drop_reminder=False):
+                 sampled_list: List[dict],
+                 name: Optional[str] = None,
+                 epoch: Optional[int] = None,
+                 shuffle: bool = True,
+                 drop_reminder: bool = False) -> None:
         self._sampled_list = sampled_list
         self._indices = np.arange(len(sampled_list))
         if shuffle:
@@ -40,7 +40,7 @@ class BatchSampler:
         self._epoch_counter = 0
         self._drop_reminder = drop_reminder
 
-    def _sample(self, num):
+    def _sample(self, num: int) -> List[int]:
         """Sample specific number of ground truths and return indices.
 
         Args:
@@ -57,7 +57,7 @@ class BatchSampler:
             self._idx += num
         return ret
 
-    def _reset(self):
+    def _reset(self) -> None:
         """Reset the index of batchsampler to zero."""
         assert self._name is not None
         # print("reset", self._name)
@@ -65,7 +65,7 @@ class BatchSampler:
             np.random.shuffle(self._indices)
         self._idx = 0
 
-    def sample(self, num):
+    def sample(self, num: int) -> List[dict]:
         """Sample specific number of ground truths.
 
         Args:
@@ -88,24 +88,29 @@ class DataBaseSampler(object):
         rate (float): Rate of actual sampled over maximum sampled number.
         prepare (dict): Name of preparation functions and the input value.
         sample_groups (dict): Sampled classes and numbers.
-        classes (list[str], optional): List of classes. Default: None.
-        points_loader(dict, optional): Config of points loader. Default:
-            dict(type='LoadPointsFromFile', load_dim=4, use_dim=[0,1,2,3])
+        classes (list[str], optional): List of classes. Defaults to None.
+        points_loader (dict): Config of points loader. Defaults to
+            dict(type='LoadPointsFromFile', load_dim=4, use_dim=[0, 1, 2, 3]).
+        file_client_args (dict): Arguments to instantiate a FileClient.
+            See :class:`mmengine.fileio.FileClient` for details.
+            Defaults to dict(backend='disk').
     """
 
-    def __init__(self,
-                 info_path,
-                 data_root,
-                 rate,
-                 prepare,
-                 sample_groups,
-                 classes=None,
-                 points_loader=dict(
-                     type='LoadPointsFromFile',
-                     coord_type='LIDAR',
-                     load_dim=4,
-                     use_dim=[0, 1, 2, 3]),
-                 file_client_args=dict(backend='disk')):
+    def __init__(
+        self,
+        info_path: str,
+        data_root: str,
+        rate: float,
+        prepare: dict,
+        sample_groups: dict,
+        classes: Optional[List[str]] = None,
+        points_loader: dict = dict(
+            type='LoadPointsFromFile',
+            coord_type='LIDAR',
+            load_dim=4,
+            use_dim=[0, 1, 2, 3]),
+        file_client_args: dict = dict(backend='disk')
+    ) -> None:
         super().__init__()
         self.data_root = data_root
         self.info_path = info_path
@@ -118,29 +123,20 @@ class DataBaseSampler(object):
         self.file_client = mmengine.FileClient(**file_client_args)
 
         # load data base infos
-        if hasattr(self.file_client, 'get_local_path'):
-            with self.file_client.get_local_path(info_path) as local_path:
-                # loading data from a file-like object needs file format
-                db_infos = mmengine.load(
-                    open(local_path, 'rb'), file_format='pkl')
-        else:
-            warnings.warn(
-                'The used MMCV version does not have get_local_path. '
-                f'We treat the {info_path} as local paths and it '
-                'might cause errors if the path is not a local path. '
-                'Please use MMCV>= 1.3.16 if you meet errors.')
-            db_infos = mmengine.load(info_path)
+        with self.file_client.get_local_path(info_path) as local_path:
+            # loading data from a file-like object needs file format
+            db_infos = mmengine.load(open(local_path, 'rb'), file_format='pkl')
 
         # filter database infos
         from mmengine.logging import MMLogger
         logger: MMLogger = MMLogger.get_current_instance()
         for k, v in db_infos.items():
-            logger.info(f'load {len(v)} {k} database infos')
+            logger.info(f'load {len(v)} {k} database infos in DataBaseSampler')
         for prep_func, val in prepare.items():
             db_infos = getattr(self, prep_func)(db_infos, val)
         logger.info('After filter database:')
         for k, v in db_infos.items():
-            logger.info(f'load {len(v)} {k} database infos')
+            logger.info(f'load {len(v)} {k} database infos in DataBaseSampler')
 
         self.db_infos = db_infos
 
@@ -163,7 +159,7 @@ class DataBaseSampler(object):
         # TODO: No group_sampling currently
 
     @staticmethod
-    def filter_by_difficulty(db_infos, removed_difficulty):
+    def filter_by_difficulty(db_infos: dict, removed_difficulty: list) -> dict:
         """Filter ground truths by difficulties.
 
         Args:
@@ -182,7 +178,7 @@ class DataBaseSampler(object):
         return new_db_infos
 
     @staticmethod
-    def filter_by_min_points(db_infos, min_gt_points_dict):
+    def filter_by_min_points(db_infos: dict, min_gt_points_dict: dict) -> dict:
         """Filter ground truths by number of points in the bbox.
 
         Args:
@@ -203,20 +199,27 @@ class DataBaseSampler(object):
                 db_infos[name] = filtered_infos
         return db_infos
 
-    def sample_all(self, gt_bboxes, gt_labels, img=None, ground_plane=None):
+    def sample_all(self,
+                   gt_bboxes: np.ndarray,
+                   gt_labels: np.ndarray,
+                   img: Optional[np.ndarray] = None,
+                   ground_plane: Optional[np.ndarray] = None) -> dict:
         """Sampling all categories of bboxes.
 
         Args:
             gt_bboxes (np.ndarray): Ground truth bounding boxes.
             gt_labels (np.ndarray): Ground truth labels of boxes.
+            img (np.ndarray, optional): Image array. Defaults to None.
+            ground_plane (np.ndarray, optional): Ground plane information.
+                Defaults to None.
 
         Returns:
             dict: Dict of sampled 'pseudo ground truths'.
 
                 - gt_labels_3d (np.ndarray): ground truths labels
-                    of sampled objects.
+                  of sampled objects.
                 - gt_bboxes_3d (:obj:`BaseInstance3DBoxes`):
-                    sampled ground truth 3D bounding boxes
+                  sampled ground truth 3D bounding boxes
                 - points (np.ndarray): sampled points
                 - group_ids (np.ndarray): ids of sampled ground truths
         """
@@ -301,7 +304,8 @@ class DataBaseSampler(object):
 
         return ret
 
-    def sample_class_v2(self, name, num, gt_bboxes):
+    def sample_class_v2(self, name: str, num: int,
+                        gt_bboxes: np.ndarray) -> List[dict]:
         """Sampling specific categories of bounding boxes.
 
         Args:

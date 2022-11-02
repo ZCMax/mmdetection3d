@@ -16,21 +16,20 @@ class MultiScaleFlipAug3D(BaseTransform):
 
     Args:
         transforms (list[dict]): Transforms to apply in each augmentation.
-        img_scale (tuple | list[tuple]: Images scales for resizing.
+        img_scale (tuple | list[tuple]): Images scales for resizing.
         pts_scale_ratio (float | list[float]): Points scale ratios for
             resizing.
-        flip (bool, optional): Whether apply flip augmentation.
-            Defaults to False.
-        flip_direction (str | list[str], optional): Flip augmentation
-            directions for images, options are "horizontal" and "vertical".
+        flip (bool): Whether apply flip augmentation. Defaults to False.
+        flip_direction (str | list[str]): Flip augmentation directions
+            for images, options are "horizontal" and "vertical".
             If flip_direction is list, multiple flip augmentations will
             be applied. It has no effect when ``flip == False``.
-            Defaults to "horizontal".
-        pcd_horizontal_flip (bool, optional): Whether apply horizontal
-            flip augmentation to point cloud. Defaults to True.
+            Defaults to 'horizontal'.
+        pcd_horizontal_flip (bool): Whether to apply horizontal flip
+            augmentation to point cloud. Defaults to False.
             Note that it works only when 'flip' is turned on.
-        pcd_vertical_flip (bool, optional): Whether apply vertical flip
-            augmentation to point cloud. Defaults to True.
+        pcd_vertical_flip (bool): Whether to apply vertical flip
+            augmentation to point cloud. Defaults to False.
             Note that it works only when 'flip' is turned on.
     """
 
@@ -46,7 +45,7 @@ class MultiScaleFlipAug3D(BaseTransform):
         self.img_scale = img_scale if isinstance(img_scale,
                                                  list) else [img_scale]
         self.pts_scale_ratio = pts_scale_ratio \
-            if isinstance(pts_scale_ratio, list) else[float(pts_scale_ratio)]
+            if isinstance(pts_scale_ratio, list) else [float(pts_scale_ratio)]
 
         assert mmengine.is_list_of(self.img_scale, tuple)
         assert mmengine.is_list_of(self.pts_scale_ratio, float)
@@ -75,7 +74,7 @@ class MultiScaleFlipAug3D(BaseTransform):
 
         Returns:
             List[dict]: The list contains the data that is augmented with
-                different scales and flips.
+            different scales and flips.
         """
         aug_data_list = []
 
@@ -112,7 +111,7 @@ class MultiScaleFlipAug3D(BaseTransform):
 
         return aug_data_list
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         """str: Return a string that describes the module."""
         repr_str = self.__class__.__name__
         repr_str += f'(transforms={self.transforms}, '

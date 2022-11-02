@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import List
+import copy
+from typing import List, Optional, Union
 
 import mmcv
 import mmengine
@@ -13,23 +14,46 @@ from mmdet.datasets.transforms import LoadAnnotations
 
 
 @TRANSFORMS.register_module()
-class LoadMultiViewImageFromFiles(object):
+class LoadMultiViewImageFromFiles(BaseTransform):
     """Load multi channel images from a list of separate channel files.
 
     Expects results['img_filename'] to be a list of filenames.
 
     Args:
-        to_float32 (bool, optional): Whether to convert the img to float32.
+        to_float32 (bool): Whether to convert the img to float32.
             Defaults to False.
-        color_type (str, optional): Color type of the file.
-            Defaults to 'unchanged'.
+        color_type (str): Color type of the file. Defaults to 'unchanged'.
+        file_client_args (dict): Arguments to instantiate a FileClient.
+            See :class:`mmengine.fileio.FileClient` for details.
+            Defaults to dict(backend='disk').
+        num_views (int): Number of view in a frame. Defaults to 5.
+        num_ref_frames (int): Number of frame in loading. Defaults to -1.
+        test_mode (bool): Whether is test mode in loading. Defaults to False.
+        set_default_scale (bool): Whether to set default scale.
+            Defaults to True.
     """
 
-    def __init__(self, to_float32=False, color_type='unchanged'):
+    def __init__(self,
+                 to_float32: bool = False,
+                 color_type: str = 'unchanged',
+                 file_client_args: dict = dict(backend='disk'),
+                 num_views: int = 5,
+                 num_ref_frames: int = -1,
+                 test_mode: bool = False,
+                 set_default_scale: bool = True) -> None:
         self.to_float32 = to_float32
         self.color_type = color_type
+        self.file_client_args = file_client_args.copy()
+        self.file_client = None
+        self.num_views = num_views
+        # num_ref_frames is used for multi-sweep loading
+        self.num_ref_frames = num_ref_frames
+        # when test_mode=False, we randomly select previous frames
+        # otherwise, select the earliest one
+        self.test_mode = test_mode
+        self.set_default_scale = set_default_scale
 
-    def __call__(self, results):
+    def transform(self, results: dict) -> Optional[dict]:
         """Call function to load multi-view image from files.
 
         Args:
@@ -37,7 +61,7 @@ class LoadMultiViewImageFromFiles(object):
 
         Returns:
             dict: The result dict containing the multi-view image data.
-                Added keys and values are described below.
+            Added keys and values are described below.
 
                 - filename (str): Multi-view image filenames.
                 - img (np.ndarray): Multi-view image arrays.
@@ -47,33 +71,151 @@ class LoadMultiViewImageFromFiles(object):
                 - scale_factor (float): Scale factor.
                 - img_norm_cfg (dict): Normalization configuration of images.
         """
-        filename = results['img_filename']
+        # TODO: consider split the multi-sweep part out of this pipeline
+        # Derive the mask and transform for loading of multi-sweep data
+        if self.num_ref_frames > 0:
+            # init choice with the current frame
+            init_choice = np.array([0], dtype=np.int64)
+            num_frames = len(results['img_filename']) // self.num_views - 1
+            if num_frames == 0:  # no previous frame, then copy cur frames
+                choices = np.random.choice(
+                    1, self.num_ref_frames, replace=True)
+            elif num_frames >= self.num_ref_frames:
+                # NOTE: suppose the info is saved following the order
+                # from latest to earlier frames
+                if self.test_mode:
+                    choices = np.arange(num_frames - self.num_ref_frames,
+                                        num_frames) + 1
+                # NOTE: +1 is for selecting previous frames
+                else:
+                    choices = np.random.choice(
+                        num_frames, self.num_ref_frames, replace=False) + 1
+            elif num_frames > 0 and num_frames < self.num_ref_frames:
+                if self.test_mode:
+                    base_choices = np.arange(num_frames) + 1
+                    random_choices = np.random.choice(
+                        num_frames,
+                        self.num_ref_frames - num_frames,
+                        replace=True) + 1
+                    choices = np.concatenate([base_choices, random_choices])
+                else:
+                    choices = np.random.choice(
+                        num_frames, self.num_ref_frames, replace=True) + 1
+            else:
+                raise NotImplementedError
+            choices = np.concatenate([init_choice, choices])
+            select_filename = []
+            for choice in choices:
+                select_filename += results['img_filename'][choice *
+                                                           self.num_views:
+                                                           (choice + 1) *
+                                                           self.num_views]
+            results['img_filename'] = select_filename
+            for key in ['cam2img', 'lidar2cam']:
+                if key in results:
+                    select_results = []
+                    for choice in choices:
+                        select_results += results[key][choice *
+                                                       self.num_views:(choice +
+                                                                       1) *
+                                                       self.num_views]
+                    results[key] = select_results
+            for key in ['ego2global']:
+                if key in results:
+                    select_results = []
+                    for choice in choices:
+                        select_results += [results[key][choice]]
+                    results[key] = select_results
+            # Transform lidar2cam to
+            # [cur_lidar]2[prev_img] and [cur_lidar]2[prev_cam]
+            for key in ['lidar2cam']:
+                if key in results:
+                    # only change matrices of previous frames
+                    for choice_idx in range(1, len(choices)):
+                        pad_prev_ego2global = np.eye(4)
+                        prev_ego2global = results['ego2global'][choice_idx]
+                        pad_prev_ego2global[:prev_ego2global.
+                                            shape[0], :prev_ego2global.
+                                            shape[1]] = prev_ego2global
+                        pad_cur_ego2global = np.eye(4)
+                        cur_ego2global = results['ego2global'][0]
+                        pad_cur_ego2global[:cur_ego2global.
+                                           shape[0], :cur_ego2global.
+                                           shape[1]] = cur_ego2global
+                        cur2prev = np.linalg.inv(pad_prev_ego2global).dot(
+                            pad_cur_ego2global)
+                        for result_idx in range(choice_idx * self.num_views,
+                                                (choice_idx + 1) *
+                                                self.num_views):
+                            results[key][result_idx] = \
+                                results[key][result_idx].dot(cur2prev)
+        # Support multi-view images with different shapes
+        # TODO: record the origin shape and padded shape
+        filename, cam2img, lidar2cam = [], [], []
+        for _, cam_item in results['images'].items():
+            filename.append(cam_item['img_path'])
+            cam2img.append(cam_item['cam2img'])
+            lidar2cam.append(cam_item['lidar2cam'])
+        results['filename'] = filename
+        results['cam2img'] = cam2img
+        results['lidar2cam'] = lidar2cam
+
+        results['ori_cam2img'] = copy.deepcopy(results['cam2img'])
+
+        if self.file_client is None:
+            self.file_client = mmengine.FileClient(**self.file_client_args)
+
         # img is of shape (h, w, c, num_views)
-        img = np.stack(
-            [mmcv.imread(name, self.color_type) for name in filename], axis=-1)
+        # h and w can be different for different views
+        img_bytes = [self.file_client.get(name) for name in filename]
+        imgs = [
+            mmcv.imfrombytes(img_byte, flag=self.color_type)
+            for img_byte in img_bytes
+        ]
+        # handle the image with different shape
+        img_shapes = np.stack([img.shape for img in imgs], axis=0)
+        img_shape_max = np.max(img_shapes, axis=0)
+        img_shape_min = np.min(img_shapes, axis=0)
+        assert img_shape_min[-1] == img_shape_max[-1]
+        if not np.all(img_shape_max == img_shape_min):
+            pad_shape = img_shape_max[:2]
+        else:
+            pad_shape = None
+        if pad_shape is not None:
+            imgs = [
+                mmcv.impad(img, shape=pad_shape, pad_val=0) for img in imgs
+            ]
+        img = np.stack(imgs, axis=-1)
         if self.to_float32:
             img = img.astype(np.float32)
+
         results['filename'] = filename
-        # unravel to list, see `DefaultFormatBundle` in formatting.py
+        # unravel to list, see `DefaultFormatBundle` in formating.py
         # which will transpose each image separately and then stack into array
         results['img'] = [img[..., i] for i in range(img.shape[-1])]
         results['img_shape'] = img.shape
         results['ori_shape'] = img.shape
         # Set initial values for default meta_keys
         results['pad_shape'] = img.shape
-        results['scale_factor'] = 1.0
+        if self.set_default_scale:
+            results['scale_factor'] = 1.0
         num_channels = 1 if len(img.shape) < 3 else img.shape[2]
         results['img_norm_cfg'] = dict(
             mean=np.zeros(num_channels, dtype=np.float32),
             std=np.ones(num_channels, dtype=np.float32),
             to_rgb=False)
+        results['num_views'] = self.num_views
+        results['num_ref_frames'] = self.num_ref_frames
         return results
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         """str: Return a string that describes the module."""
         repr_str = self.__class__.__name__
         repr_str += f'(to_float32={self.to_float32}, '
-        repr_str += f"color_type='{self.color_type}')"
+        repr_str += f"color_type='{self.color_type}', "
+        repr_str += f'num_views={self.num_views}, '
+        repr_str += f'num_ref_frames={self.num_ref_frames}, '
+        repr_str += f'test_mode={self.test_mode})'
         return repr_str
 
 
@@ -132,32 +274,27 @@ class LoadPointsFromMultiSweeps(BaseTransform):
     This is usually used for nuScenes dataset to utilize previous sweeps.
 
     Args:
-        sweeps_num (int, optional): Number of sweeps. Defaults to 10.
-        load_dim (int, optional): Dimension number of the loaded points.
-            Defaults to 5.
-        use_dim (list[int], optional): Which dimension to use.
-            Defaults to [0, 1, 2, 4].
-        file_client_args (dict, optional): Config dict of file clients,
-            refer to
-            https://github.com/open-mmlab/mmcv/blob/master/mmcv/fileio/file_client.py
-            for more details. Defaults to dict(backend='disk').
-        pad_empty_sweeps (bool, optional): Whether to repeat keyframe when
+        sweeps_num (int): Number of sweeps. Defaults to 10.
+        load_dim (int): Dimension number of the loaded points. Defaults to 5.
+        use_dim (list[int]): Which dimension to use. Defaults to [0, 1, 2, 4].
+        file_client_args (dict): Arguments to instantiate a FileClient.
+            See :class:`mmengine.fileio.FileClient` for details.
+            Defaults to dict(backend='disk').
+        pad_empty_sweeps (bool): Whether to repeat keyframe when
             sweeps is empty. Defaults to False.
-        remove_close (bool, optional): Whether to remove close points.
-            Defaults to False.
-        test_mode (bool, optional): If `test_mode=True`, it will not
-            randomly sample sweeps but select the nearest N frames.
-            Defaults to False.
+        remove_close (bool): Whether to remove close points. Defaults to False.
+        test_mode (bool): If `test_mode=True`, it will not randomly sample
+            sweeps but select the nearest N frames. Defaults to False.
     """
 
     def __init__(self,
-                 sweeps_num=10,
-                 load_dim=5,
-                 use_dim=[0, 1, 2, 4],
-                 file_client_args=dict(backend='disk'),
-                 pad_empty_sweeps=False,
-                 remove_close=False,
-                 test_mode=False):
+                 sweeps_num: int = 10,
+                 load_dim: int = 5,
+                 use_dim: List[int] = [0, 1, 2, 4],
+                 file_client_args: dict = dict(backend='disk'),
+                 pad_empty_sweeps: bool = False,
+                 remove_close: bool = False,
+                 test_mode: bool = False) -> None:
         self.load_dim = load_dim
         self.sweeps_num = sweeps_num
         self.use_dim = use_dim
@@ -167,7 +304,7 @@ class LoadPointsFromMultiSweeps(BaseTransform):
         self.remove_close = remove_close
         self.test_mode = test_mode
 
-    def _load_points(self, pts_filename):
+    def _load_points(self, pts_filename: str) -> np.ndarray:
         """Private function to load point clouds data.
 
         Args:
@@ -189,16 +326,18 @@ class LoadPointsFromMultiSweeps(BaseTransform):
                 points = np.fromfile(pts_filename, dtype=np.float32)
         return points
 
-    def _remove_close(self, points, radius=1.0):
-        """Removes point too close within a certain radius from origin.
+    def _remove_close(self,
+                      points: Union[np.ndarray, BasePoints],
+                      radius: float = 1.0) -> Union[np.ndarray, BasePoints]:
+        """Remove point too close within a certain radius from origin.
 
         Args:
             points (np.ndarray | :obj:`BasePoints`): Sweep points.
-            radius (float, optional): Radius below which points are removed.
+            radius (float): Radius below which points are removed.
                 Defaults to 1.0.
 
         Returns:
-            np.ndarray: Points after removing.
+            np.ndarray | :obj:`BasePoints`: Points after removing.
         """
         if isinstance(points, np.ndarray):
             points_numpy = points
@@ -211,7 +350,7 @@ class LoadPointsFromMultiSweeps(BaseTransform):
         not_close = np.logical_not(np.logical_and(x_filt, y_filt))
         return points[not_close]
 
-    def transform(self, results):
+    def transform(self, results: dict) -> dict:
         """Call function to load multi-sweep point clouds from files.
 
         Args:
@@ -220,10 +359,10 @@ class LoadPointsFromMultiSweeps(BaseTransform):
 
         Returns:
             dict: The result dict containing the multi-sweep points data.
-                Added key and value are described below.
+            Updated key and value are described below.
 
                 - points (np.ndarray | :obj:`BasePoints`): Multi-sweep point
-                    cloud arrays.
+                  cloud arrays.
         """
         points = results['points']
         points.tensor[:, 4] = 0
@@ -268,7 +407,7 @@ class LoadPointsFromMultiSweeps(BaseTransform):
         results['points'] = points
         return results
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         """str: Return a string that describes the module."""
         return f'{self.__class__.__name__}(sweeps_num={self.sweeps_num})'
 
@@ -290,7 +429,7 @@ class PointSegClassMapping(BaseTransform):
     others as len(valid_cat_ids).
     """
 
-    def transform(self, results: dict) -> None:
+    def transform(self, results: dict) -> dict:
         """Call function to map original semantic class to valid category ids.
 
         Args:
@@ -298,7 +437,7 @@ class PointSegClassMapping(BaseTransform):
 
         Returns:
             dict: The result dict containing the mapped category ids.
-                Updated key and value are described below.
+            Updated key and value are described below.
 
                 - pts_semantic_mask (np.ndarray): Mapped semantic masks.
         """
@@ -319,11 +458,9 @@ class PointSegClassMapping(BaseTransform):
 
         return results
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         """str: Return a string that describes the module."""
         repr_str = self.__class__.__name__
-        repr_str += f'(valid_cat_ids={self.valid_cat_ids}, '
-        repr_str += f'max_cat_id={self.max_cat_id})'
         return repr_str
 
 
@@ -346,7 +483,7 @@ class NormalizePointsColor(BaseTransform):
 
         Returns:
             dict: The result dict containing the normalized points.
-                Updated key and value are described below.
+            Updated key and value are described below.
 
                 - points (:obj:`BasePoints`): Points after color normalization.
         """
@@ -361,7 +498,7 @@ class NormalizePointsColor(BaseTransform):
         input_dict['points'] = points
         return input_dict
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         """str: Return a string that describes the module."""
         repr_str = self.__class__.__name__
         repr_str += f'(color_mean={self.color_mean})'
@@ -385,29 +522,26 @@ class LoadPointsFromFile(BaseTransform):
     Args:
         coord_type (str): The type of coordinates of points cloud.
             Available options includes:
+
             - 'LIDAR': Points in LiDAR coordinates.
             - 'DEPTH': Points in depth coordinates, usually for indoor dataset.
             - 'CAMERA': Points in camera coordinates.
-        load_dim (int, optional): The dimension of the loaded points.
-            Defaults to 6.
-        use_dim (list[int], optional): Which dimensions of the points to use.
+        load_dim (int): The dimension of the loaded points. Defaults to 6.
+        use_dim (list[int] | int): Which dimensions of the points to use.
             Defaults to [0, 1, 2]. For KITTI dataset, set use_dim=4
             or use_dim=[0, 1, 2, 3] to use the intensity dimension.
-        shift_height (bool, optional): Whether to use shifted height.
-            Defaults to False.
-        use_color (bool, optional): Whether to use color features.
-            Defaults to False.
-        file_client_args (dict, optional): Config dict of file clients,
-            refer to
-            https://github.com/open-mmlab/mmcv/blob/master/mmcv/fileio/file_client.py
-            for more details. Defaults to dict(backend='disk').
+        shift_height (bool): Whether to use shifted height. Defaults to False.
+        use_color (bool): Whether to use color features. Defaults to False.
+        file_client_args (dict): Arguments to instantiate a FileClient.
+            See :class:`mmengine.fileio.FileClient` for details.
+            Defaults to dict(backend='disk').
     """
 
     def __init__(
         self,
         coord_type: str,
         load_dim: int = 6,
-        use_dim: list = [0, 1, 2],
+        use_dim: Union[int, List[int]] = [0, 1, 2],
         shift_height: bool = False,
         use_color: bool = False,
         file_client_args: dict = dict(backend='disk')
@@ -457,7 +591,7 @@ class LoadPointsFromFile(BaseTransform):
 
         Returns:
             dict: The result dict containing the point clouds data.
-                Added key and value are described below.
+            Added key and value are described below.
 
                 - points (:obj:`BasePoints`): Point clouds data.
         """
@@ -493,7 +627,7 @@ class LoadPointsFromFile(BaseTransform):
 
         return results
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         """str: Return a string that describes the module."""
         repr_str = self.__class__.__name__ + '('
         repr_str += f'shift_height={self.shift_height}, '
@@ -523,6 +657,7 @@ class LoadAnnotations3D(LoadAnnotations):
     Required Keys:
 
     - ann_info (dict)
+
         - gt_bboxes_3d (:obj:`LiDARInstance3DBoxes` |
           :obj:`DepthInstance3DBoxes` | :obj:`CameraInstance3DBoxes`):
           3D ground truth bboxes. Only when `with_bbox_3d` is True
@@ -542,7 +677,7 @@ class LoadAnnotations3D(LoadAnnotations):
     - pts_instance_mask_path (str): Path of instance mask file.
       Only when `with_mask_3d` is True.
     - pts_semantic_mask_path (str): Path of semantic mask file.
-      Only when
+      Only when `with_seg_3d` is True.
 
     Added Keys:
 
@@ -567,33 +702,25 @@ class LoadAnnotations3D(LoadAnnotations):
       Only when `with_seg_3d` is True.
 
     Args:
-        with_bbox_3d (bool, optional): Whether to load 3D boxes.
+        with_bbox_3d (bool): Whether to load 3D boxes. Defaults to True.
+        with_label_3d (bool): Whether to load 3D labels. Defaults to True.
+        with_attr_label (bool): Whether to load attribute label.
+            Defaults to False.
+        with_mask_3d (bool): Whether to load 3D instance masks for points.
+            Defaults to False.
+        with_seg_3d (bool): Whether to load 3D semantic masks for points.
+            Defaults to False.
+        with_bbox (bool): Whether to load 2D boxes. Defaults to False.
+        with_label (bool): Whether to load 2D labels. Defaults to False.
+        with_mask (bool): Whether to load 2D instance masks. Defaults to False.
+        with_seg (bool): Whether to load 2D semantic masks. Defaults to False.
+        with_bbox_depth (bool): Whether to load 2.5D boxes. Defaults to False.
+        poly2mask (bool): Whether to convert polygon annotations to bitmasks.
             Defaults to True.
-        with_label_3d (bool, optional): Whether to load 3D labels.
-            Defaults to True.
-        with_attr_label (bool, optional): Whether to load attribute label.
-            Defaults to False.
-        with_mask_3d (bool, optional): Whether to load 3D instance masks.
-            for points. Defaults to False.
-        with_seg_3d (bool, optional): Whether to load 3D semantic masks.
-            for points. Defaults to False.
-        with_bbox (bool, optional): Whether to load 2D boxes.
-            Defaults to False.
-        with_label (bool, optional): Whether to load 2D labels.
-            Defaults to False.
-        with_mask (bool, optional): Whether to load 2D instance masks.
-            Defaults to False.
-        with_seg (bool, optional): Whether to load 2D semantic masks.
-            Defaults to False.
-        with_bbox_depth (bool, optional): Whether to load 2.5D boxes.
-            Defaults to False.
-        poly2mask (bool, optional): Whether to convert polygon annotations
-            to bitmasks. Defaults to True.
-        seg_3d_dtype (dtype, optional): Dtype of 3D semantic masks.
-            Defaults to int64.
-        file_client_args (dict): Config dict of file clients, refer to
-            https://github.com/open-mmlab/mmcv/blob/master/mmcv/fileio/file_client.py
-            for more details.
+        seg_3d_dtype (dtype): Dtype of 3D semantic masks. Defaults to int64.
+        file_client_args (dict): Arguments to instantiate a FileClient.
+            See :class:`mmengine.fileio.FileClient` for details.
+            Defaults to dict(backend='disk').
     """
 
     def __init__(
@@ -743,7 +870,8 @@ class LoadAnnotations3D(LoadAnnotations):
         `ignore_flag`
 
         Args:
-            results (dict): Result dict from :obj:``mmcv.BaseDataset``.
+            results (dict): Result dict from :obj:`mmcv.BaseDataset`.
+
         Returns:
             dict: The dict contains loaded bounding box annotations.
         """
@@ -754,7 +882,7 @@ class LoadAnnotations3D(LoadAnnotations):
         """Private function to load label annotations.
 
         Args:
-            results (dict): Result dict from :obj :obj:``mmcv.BaseDataset``.
+            results (dict): Result dict from :obj :obj:`mmcv.BaseDataset`.
 
         Returns:
             dict: The dict contains loaded label annotations.
@@ -787,7 +915,7 @@ class LoadAnnotations3D(LoadAnnotations):
 
         return results
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         """str: Return a string that describes the module."""
         indent_str = '    '
         repr_str = self.__class__.__name__ + '(\n'

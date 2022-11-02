@@ -108,8 +108,8 @@ class SingleStage3DDetector(Base3DDetector):
         """
         x = self.extract_feat(batch_inputs_dict)
         results_list = self.bbox_head.predict(x, batch_data_samples, **kwargs)
-        predictions = self.convert_to_datasample(batch_data_samples,
-                                                 results_list)
+        predictions = self.add_pred_to_datasample(batch_data_samples,
+                                                  results_list)
         return predictions
 
     def _forward(self,
@@ -143,7 +143,11 @@ class SingleStage3DDetector(Base3DDetector):
         """Directly extract features from the backbone+neck.
 
         Args:
-            points (torch.Tensor): Input points.
+            batch_inputs_dict (dict): The model input dict which include
+                'points', 'img' keys.
+
+                    - points (list[torch.Tensor]): Point cloud of each sample.
+                    - imgs (torch.Tensor, optional): Image of each sample.
 
         Returns:
             tuple[Tensor] | dict:  For outside 3D object detection, we
