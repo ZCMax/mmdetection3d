@@ -44,7 +44,7 @@ def _get_config_module(fname):
     return config_mod
 
 
-def _get_dataset_cfg(fname):
+def get_dataset_cfg(fname):
     """Grab configs necessary to create a model.
 
     These are deep copied to allow for safe modification of parameters without
@@ -56,7 +56,7 @@ def _get_dataset_cfg(fname):
     return dataset
 
 
-def _get_model_cfg(fname):
+def get_model_cfg(fname):
     """Grab configs necessary to create a model.
 
     These are deep copied to allow for safe modification of parameters without
