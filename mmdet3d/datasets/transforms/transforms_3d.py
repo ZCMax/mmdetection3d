@@ -1877,6 +1877,47 @@ class Resize3D(Resize):
         results['cam2img'][0] *= np.array(results['scale_factor'][0])
         results['cam2img'][1] *= np.array(results['scale_factor'][1])
 
+    def _resize_depth_map(self, results: dict) -> None:
+        """
+        Adapted from:
+            https://github.com/TRI-ML/packnet-sfm_internal/blob/919ab604ae2319e4554d3b588877acfddf877f9c/packnet_sfm/datasets/augmentations.py#L93
+
+        -------------------------------------------------------------------------------------------------------------------
+
+        Resizes depth map preserving all valid depth pixels
+        Multiple downsampled points can be assigned to the same pixel.
+        Parameters
+        ----------
+        depth : np.array [h,w]
+            Depth map
+        shape : tuple (H,W)
+            Output shape
+        Returns
+        -------
+        depth : np.array [H,W,1]
+            Resized depth map
+        """
+        if results.get('depth_map', None) is not None:
+            h, w = results['ori_shape']
+            new_h, new_w = results['img_shape']
+            # (h, w)
+            x = results['depth_map'].reshape(-1)
+            # Create coordinate grid
+            uv = np.mgrid[:h, :w].transpose(1, 2, 0).reshape(-1, 2)
+            # Filters valid points
+            idx = x > 0
+            crd, val = uv[idx], x[idx]
+            # Downsamples coordinates
+            crd[:, 0] = (crd[:, 0] * (new_h / h)).astype(np.int32)
+            crd[:, 1] = (crd[:, 1] * (new_w / w)).astype(np.int32)
+            # Filters points inside image
+            idx = (crd[:, 0] < new_h) & (crd[:, 1] < new_w)
+            crd, val = crd[idx], val[idx]
+            # Creates downsampled depth image and assigns points
+            resized_depth_map = np.zeros((new_h, new_w))
+            resized_depth_map[crd[:, 0], crd[:, 1]] = val
+            results['depth_map'] = resized_depth_map
+
     def transform(self, results: dict) -> dict:
         """Transform function to resize images, bounding boxes, semantic
         segmentation map and keypoints.
@@ -1892,6 +1933,7 @@ class Resize3D(Resize):
 
         super(Resize3D, self).transform(results)
         self._resize_3d(results)
+        self._resize_depth_map(results)
         return results
 
 

@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 from mmdet.structures import DetDataSample
-from mmengine.structures import InstanceData
+from mmengine.structures import InstanceData, PixelData
 
 from .point_data import PointData
 
@@ -228,6 +228,30 @@ class Det3DDataSample(DetDataSample):
     @pred_pts_seg.deleter
     def pred_pts_seg(self):
         del self._pred_pts_seg
+
+    @property
+    def gt_depth_map(self) -> PixelData:
+        return self._gt_depth_map
+
+    @gt_depth_map.setter
+    def gt_depth_map(self, value: PixelData) -> None:
+        self.set_field(value, '_gt_depth_map', dtype=PixelData)
+
+    @gt_depth_map.deleter
+    def gt_depth_map(self) -> None:
+        del self._gt_depth_map
+
+    @property
+    def pred_depth_map(self) -> PixelData:
+        return self._pred_depth_map
+
+    @pred_depth_map.setter
+    def pred_depth_map(self, value: PixelData) -> None:
+        self.set_field(value, '_pred_depth_map', dtype=PixelData)
+
+    @pred_depth_map.deleter
+    def pred_depth_map(self) -> None:
+        del self._pred_depth_map
 
 
 SampleList = List[Det3DDataSample]

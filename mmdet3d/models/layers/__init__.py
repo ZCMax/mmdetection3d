@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from .box3d_nms import (aligned_3d_nms, box3d_multiclass_nms, circle_nms,
                         nms_bev, nms_normal_bev)
+from .bricks import Offset
 from .dgcnn_modules import DGCNNFAModule, DGCNNFPModule, DGCNNGFModule
 from .edge_fusion_module import EdgeFusionModule
 from .fusion_layers import (PointFusion, VoteFusion, apply_3d_transformation,
@@ -26,5 +27,5 @@ __all__ = [
     'MLP', 'box3d_multiclass_nms', 'aligned_3d_nms', 'circle_nms', 'nms_bev',
     'nms_normal_bev', 'build_sa_module', 'PointSAModuleMSG', 'PointSAModule',
     'PointFPModule', 'PAConvSAModule', 'PAConvSAModuleMSG',
-    'PAConvCUDASAModule', 'PAConvCUDASAModuleMSG'
+    'PAConvCUDASAModule', 'PAConvCUDASAModuleMSG', 'Offset'
 ]

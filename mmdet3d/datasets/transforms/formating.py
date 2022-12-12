@@ -5,7 +5,7 @@ import mmengine
 import numpy as np
 import torch
 from mmcv import BaseTransform
-from mmengine.structures import InstanceData
+from mmengine.structures import InstanceData, PixelData
 from numpy import dtype
 
 from mmdet3d.registry import TRANSFORMS
@@ -66,10 +66,11 @@ class Pack3DDetInputs(BaseTransform):
         keys: tuple,
         meta_keys: tuple = ('img_path', 'ori_shape', 'img_shape', 'lidar2img',
                             'depth2img', 'cam2img', 'pad_shape',
-                            'scale_factor', 'flip', 'pcd_horizontal_flip',
-                            'pcd_vertical_flip', 'box_mode_3d', 'box_type_3d',
-                            'img_norm_cfg', 'num_pts_feats', 'pcd_trans',
-                            'sample_idx', 'pcd_scale_factor', 'pcd_rotation',
+                            'depth_map_path', 'scale_factor', 'flip',
+                            'pcd_horizontal_flip', 'pcd_vertical_flip',
+                            'box_mode_3d', 'box_type_3d', 'img_norm_cfg',
+                            'num_pts_feats', 'pcd_trans', 'sample_idx',
+                            'pcd_scale_factor', 'pcd_rotation',
                             'pcd_rotation_angle', 'lidar_path',
                             'transformation_3d_flow', 'trans_mat',
                             'affine_aug', 'sweep_img_metas', 'ori_cam2img',
@@ -177,11 +178,14 @@ class Pack3DDetInputs(BaseTransform):
                 results['gt_semantic_seg'][None])
         if 'gt_seg_map' in results:
             results['gt_seg_map'] = results['gt_seg_map'][None, ...]
+        if 'depth_map' in results:
+            results['depth_map'] = to_tensor(results['depth_map'])
 
         data_sample = Det3DDataSample()
         gt_instances_3d = InstanceData()
         gt_instances = InstanceData()
         gt_pts_seg = PointData()
+        gt_depth_map = PixelData()
 
         img_metas = {}
         for key in self.meta_keys:
@@ -203,6 +207,8 @@ class Pack3DDetInputs(BaseTransform):
                         gt_instances[self._remove_prefix(key)] = results[key]
                 elif key in self.SEG_KEYS:
                     gt_pts_seg[self._remove_prefix(key)] = results[key]
+                elif key == 'depth_map':
+                    gt_depth_map.set_data(dict(data=results[key]))
                 else:
                     raise NotImplementedError(f'Please modified '
                                               f'`Pack3DDetInputs` '
@@ -212,6 +218,8 @@ class Pack3DDetInputs(BaseTransform):
         data_sample.gt_instances_3d = gt_instances_3d
         data_sample.gt_instances = gt_instances
         data_sample.gt_pts_seg = gt_pts_seg
+        data_sample.gt_depth_map = gt_depth_map
+
         if 'eval_ann_info' in results:
             data_sample.eval_ann_info = results['eval_ann_info']
         else:

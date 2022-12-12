@@ -301,9 +301,13 @@ def update_nuscenes_infos(pkl_path, out_dir):
             temp_lidar_sweep['ego2global'] = convert_quaternion_to_matrix(
                 ori_sweep['ego2global_rotation'],
                 ori_sweep['ego2global_translation'])
-            lidar2sensor = np.eye(4)
-            lidar2sensor[:3, :3] = ori_sweep['sensor2lidar_rotation'].T
-            lidar2sensor[:3, 3] = -ori_sweep['sensor2lidar_translation']
+            sensor2lidar = np.eye(4)
+            sensor2lidar[:3, :3] = ori_sweep['sensor2lidar_rotation']
+            sensor2lidar[:3, 3] = ori_sweep['sensor2lidar_translation']
+            lidar2sensor = np.linalg.inv(sensor2lidar)
+            # lidar2sensor = np.eye(4)
+            # lidar2sensor[:3, :3] = ori_sweep['sensor2lidar_rotation'].T
+            # lidar2sensor[:3, 3] = -ori_sweep['sensor2lidar_translation']
             temp_lidar_sweep['lidar_points'][
                 'lidar2sensor'] = lidar2sensor.astype(np.float32).tolist()
             temp_lidar_sweep['timestamp'] = ori_sweep['timestamp'] / 1e6
@@ -327,11 +331,20 @@ def update_nuscenes_infos(pkl_path, out_dir):
             empty_img_info['cam2ego'] = convert_quaternion_to_matrix(
                 ori_info_dict['cams'][cam]['sensor2ego_rotation'],
                 ori_info_dict['cams'][cam]['sensor2ego_translation'])
-            lidar2sensor = np.eye(4)
-            lidar2sensor[:3, :3] = ori_info_dict['cams'][cam][
-                'sensor2lidar_rotation'].T
-            lidar2sensor[:3, 3] = -ori_info_dict['cams'][cam][
+            empty_img_info['ego2global'] = convert_quaternion_to_matrix(
+                ori_info_dict['cams'][cam]['ego2global_rotation'],
+                ori_info_dict['cams'][cam]['ego2global_translation'])
+            sensor2lidar = np.eye(4)
+            sensor2lidar[:3, :3] = ori_info_dict['cams'][cam][
+                'sensor2lidar_rotation']
+            sensor2lidar[:3, 3] = ori_info_dict['cams'][cam][
                 'sensor2lidar_translation']
+            lidar2sensor = np.linalg.inv(sensor2lidar)
+            # lidar2sensor = np.eye(4)
+            # lidar2sensor[:3, :3] = ori_info_dict['cams'][cam][
+            #     'sensor2lidar_rotation'].T
+            # lidar2sensor[:3, 3] = -ori_info_dict['cams'][cam][
+            #     'sensor2lidar_translation']
             empty_img_info['lidar2cam'] = lidar2sensor.astype(
                 np.float32).tolist()
             temp_data_info['images'][cam] = empty_img_info

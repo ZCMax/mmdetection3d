@@ -261,6 +261,7 @@ class LoadImageFromFileMono3D(LoadImageFromFile):
             img = img.astype(np.float32)
 
         results['img'] = img
+        results['img_path'] = filename
         results['img_shape'] = img.shape[:2]
         results['ori_shape'] = img.shape[:2]
 
@@ -727,6 +728,7 @@ class LoadAnnotations3D(LoadAnnotations):
         self,
         with_bbox_3d: bool = True,
         with_label_3d: bool = True,
+        with_depth_map: bool = False,
         with_attr_label: bool = False,
         with_mask_3d: bool = False,
         with_seg_3d: bool = False,
@@ -749,6 +751,7 @@ class LoadAnnotations3D(LoadAnnotations):
         self.with_bbox_3d = with_bbox_3d
         self.with_bbox_depth = with_bbox_depth
         self.with_label_3d = with_label_3d
+        self.with_depth_map = with_depth_map
         self.with_attr_label = with_attr_label
         self.with_mask_3d = with_mask_3d
         self.with_seg_3d = with_seg_3d
@@ -805,6 +808,33 @@ class LoadAnnotations3D(LoadAnnotations):
             dict: The dict containing loaded label annotations.
         """
         results['attr_labels'] = results['ann_info']['attr_labels']
+        return results
+
+    def _load_depth_map(self, results: dict) -> dict:
+
+        img_filename = results['img_path']
+        pts_filename = img_filename.replace('samples', 'depth_points') + '.bin'
+        results['depth_map_path'] = pts_filename
+        if self.file_client is None:
+            self.file_client = mmengine.FileClient(**self.file_client_args)
+        try:
+            pts_bytes = self.file_client.get(pts_filename)
+            points = np.frombuffer(pts_bytes, dtype=np.float32)
+        except ConnectionError:
+            mmengine.check_file_exist(pts_filename)
+            if pts_filename.endswith('.npy'):
+                points = np.load(pts_filename)
+            else:
+                points = np.fromfile(pts_filename, dtype=np.float32)
+        pts_img = points.reshape(-1, 3)
+        img_shape = results['ori_shape']
+        depth_img = np.zeros(img_shape, dtype=np.float32)
+        iy = np.round(pts_img[:, 1]).astype(np.int64)
+        ix = np.round(pts_img[:, 0]).astype(np.int64)
+        depth_img[iy, ix] = pts_img[:, 2]
+        results['depth_map'] = depth_img
+        print(depth_img.shape)
+
         return results
 
     def _load_masks_3d(self, results: dict) -> dict:
@@ -906,6 +936,8 @@ class LoadAnnotations3D(LoadAnnotations):
             results = self._load_bboxes_depth(results)
         if self.with_label_3d:
             results = self._load_labels_3d(results)
+        if self.with_depth_map:
+            results = self._load_depth_map(results)
         if self.with_attr_label:
             results = self._load_attr_labels(results)
         if self.with_mask_3d:
