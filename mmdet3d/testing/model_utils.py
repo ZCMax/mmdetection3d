@@ -5,7 +5,7 @@ from os.path import dirname, exists, join
 
 import numpy as np
 import torch
-from mmengine.structures import InstanceData
+from mmengine.structures import InstanceData, PixelData
 
 from mmdet3d.structures import (CameraInstance3DBoxes, DepthInstance3DBoxes,
                                 Det3DDataSample, LiDARInstance3DBoxes,
@@ -157,5 +157,33 @@ def create_detector_inputs(seed=0,
     if with_pts_semantic_mask:
         pts_semantic_mask = torch.randint(0, num_classes, [num_points])
         data_sample.gt_pts_seg['pts_semantic_mask'] = pts_semantic_mask
+
+    return dict(inputs=inputs_dict, data_samples=[data_sample])
+
+
+def create_predictor_inputs(seed=0, img_size=(512, 928)):
+    setup_seed(seed)
+    meta_info = dict()
+    meta_info['cam2img'] = np.array([[707.0493, 0.0, 604.0814, 45.75831],
+                                     [0.0, 707.0493, 180.5066, -0.3454157],
+                                     [0.0, 0.0, 1.0, 0.004981016],
+                                     [0.0, 0.0, 0.0, 1.0]])
+
+    inputs_dict = dict()
+
+    if isinstance(img_size, tuple):
+        img = torch.rand(3, img_size[0], img_size[1])
+        meta_info['img_shape'] = img_size
+        meta_info['ori_shape'] = img_size
+    else:
+        img = torch.rand(3, img_size, img_size)
+        meta_info['img_shape'] = (img_size, img_size)
+        meta_info['ori_shape'] = (img_size, img_size)
+    meta_info['scale_factor'] = np.array([1., 1.])
+    inputs_dict['img'] = [img]
+    data_sample = Det3DDataSample()
+    data_sample.set_metainfo(meta_info)
+    data_sample.gt_depth_map = PixelData(
+        data=torch.rand([512, 928], dtype=torch.float32))
 
     return dict(inputs=inputs_dict, data_samples=[data_sample])

@@ -5,13 +5,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from mmcv.cnn import ConvModule, Scale
-from mmdet.registry import MODELS
-from mmdet.utils import ConfigType, InstanceList
 from mmengine.model import BaseModule
+from mmengine.structures import PixelData
 from torch import Tensor
 
 from mmdet3d.models.layers import Offset
+from mmdet3d.registry import MODELS
 from mmdet3d.structures.det3d_data_sample import SampleList
+from mmdet3d.utils import ConfigType
 
 INF = 1e8
 
@@ -95,12 +96,12 @@ class DenseDepthHead(BaseModule):
                  feat_channels: int,
                  num_levels: int,
                  stacked_convs: int,
-                 strides: Sequence[int] = (4, 8, 16, 32, 64),
+                 strides: Sequence[int] = (4, 8, 16, 32),
                  mean_depth_per_level: List[float] = [
-                     44.921, 20.252, 11.712, 7.166, 8.548
+                     44.921, 20.252, 11.712, 7.166
                  ],
                  std_depth_per_level: List[float] = [
-                     24.331, 9.833, 6.223, 4.611, 8.275
+                     24.331, 9.833, 6.223, 4.611
                  ],
                  scale_depth: bool = True,
                  depth_scale_init_factor: float = 0.3,
@@ -109,7 +110,7 @@ class DenseDepthHead(BaseModule):
                  feature_locations_offset: str = 'none',
                  dcn_on_last_conv: bool = False,
                  conv_bias: Union[bool, str] = 'auto',
-                 loss_dense_depth: ConfigType = dict(type='DenseDepthL1loss'),
+                 loss_dense_depth: ConfigType = dict(type='DenseDepthL1Loss'),
                  init_cfg: dict = None,
                  **kwargs) -> None:
         super(DenseDepthHead, self).__init__(init_cfg)
@@ -139,7 +140,7 @@ class DenseDepthHead(BaseModule):
         self._init_predictor()
         if self.use_scale:
             self.scales_depth = nn.ModuleList([
-                Scale(init_value=sigma * self.depth_scale_init_factor)
+                Scale(scale=sigma * self.depth_scale_init_factor)
                 for sigma in self.std_depth_per_level
             ])
             self.offsets_depth = nn.ModuleList(
@@ -156,7 +157,7 @@ class DenseDepthHead(BaseModule):
     def _init_predictor(self) -> None:
         """Initialize predictor layers of the head."""
         self.conv_depth = nn.ModuleList([
-            nn.Conv2d(self.feat_channels, self.cls_out_channels, 3, padding=1)
+            nn.Conv2d(self.feat_channels, 1, 3, padding=1)
             for _ in range(self.num_levels)
         ])
 
@@ -250,7 +251,7 @@ class DenseDepthHead(BaseModule):
             batch_img_metas.append(data_sample.metainfo)
             batch_gt_dense_depth.append(data_sample.gt_depth_map.data)
 
-        loss_inputs = outs + (batch_gt_dense_depth, batch_img_metas)
+        loss_inputs = (outs, batch_gt_dense_depth, batch_img_metas)
         losses = self.loss_by_feat(*loss_inputs)
 
         return losses
@@ -292,7 +293,7 @@ class DenseDepthHead(BaseModule):
         ])
 
         # (B, 1, H, W)
-        gt_dense_depth = torch.stack(batch_gt_dense_depth)
+        gt_dense_depth = torch.stack(batch_gt_dense_depth).squeeze(1)
         inv_cam2imgs = cam2imgs.inverse()
 
         # Upsample to the input image shape
@@ -316,15 +317,13 @@ class DenseDepthHead(BaseModule):
 
         loss_dict = {}
         for lvl, x in enumerate(dense_depth):
-            loss_lvl = self.loss_dense_depth(x, gt_dense_depth.tensor)
-            loss_lvl = loss_lvl / (torch.sqrt(2)**lvl)  # Is sqrt(2) good?
+            print('lvl level:', x.shape)
+            loss_lvl = self.loss_dense_depth(x, gt_dense_depth)
+            # loss_lvl = loss_lvl / (torch.sqrt(2)**lvl)  # Is sqrt(2) good?
             loss_dict.update({f'loss_dense_depth_lvl_{lvl}': loss_lvl})
         return loss_dict
 
-    def predict(self,
-                x: Tuple[Tensor],
-                batch_data_samples: SampleList,
-                rescale: bool = False) -> InstanceList:
+    def predict(self, x: Tuple[Tensor], batch_data_samples):
         """Perform forward propagation of the detection head and predict
         detection results on the features of the upstream network.
 
@@ -341,5 +340,58 @@ class DenseDepthHead(BaseModule):
             list[obj:`InstanceData`]: Detection results of each image
             after the post process.
         """
-        predictions = self(x)
-        return predictions
+        outs = self(x)
+        batch_img_metas = []
+        for data_sample in batch_data_samples:
+            batch_img_metas.append(data_sample.metainfo)
+
+        inputs = (outs, batch_img_metas)
+        results = self.predict_by_feat(*inputs)
+
+        return results
+
+    def predict_by_feat(self, dense_depth: List[Tensor], batch_img_metas):
+        """Perform forward propagation of the detection head and predict
+        detection results on the features of the upstream network.
+
+        Args:
+            x (tuple[Tensor]): Multi-level features from the
+                upstream network, each is a 4D-tensor.
+            batch_data_samples (List[:obj:`Det3DDataSample`]): The Data
+                Samples. It usually includes information such as
+                `gt_instance_3d`, `gt_pts_panoptic_seg` and `gt_pts_sem_seg`.
+            rescale (bool, optional): Whether to rescale the results.
+                Defaults to False.
+
+        Returns:
+            list[obj:`InstanceData`]: Detection results of each image
+            after the post process.
+        """
+        cam2imgs = torch.stack([
+            dense_depth[0].new_tensor(img_meta['cam2img'])
+            for img_meta in batch_img_metas
+        ])
+        inv_cam2imgs = cam2imgs.inverse()
+        # Upsample to the input image shape
+        dense_depth = [
+            aligned_bilinear(
+                x, factor=stride,
+                offset=self.feature_locations_offset).squeeze(1)
+            for x, stride in zip(dense_depth, self.strides)
+        ]
+        if self.scale_depth:
+            assert inv_cam2imgs is not None
+            pixel_size = torch.norm(
+                torch.stack([inv_cam2imgs[:, 0, 0], inv_cam2imgs[:, 1, 1]],
+                            dim=-1),
+                dim=-1)
+            scaled_pixel_size = (
+                pixel_size * self.scale_depth_by_focal_lengths_factor).reshape(
+                    -1, 1, 1)
+            dense_depth = [x / scaled_pixel_size for x in dense_depth]
+        pred_dense_depth = dense_depth[0]
+        results_list = [
+            PixelData(data=pred_dense_depth[i])
+            for i in range(len(pred_dense_depth))
+        ]
+        return results_list

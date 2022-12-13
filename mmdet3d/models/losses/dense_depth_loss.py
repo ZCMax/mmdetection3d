@@ -52,7 +52,7 @@ class DenseDepthL1Loss(nn.Module):
                 override the original reduction method of the loss.
                 Defaults to None.
         """
-        M = (depth_gt < self.min_depth).to(
+        M = (depth_gt <= self.min_depth).to(
             torch.float32) + (depth_gt > self.max_depth).to(torch.float32)
         if masks is not None:
             M += (1. - masks).to(torch.float32)

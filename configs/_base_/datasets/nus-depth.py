@@ -29,7 +29,7 @@ train_pipeline = [
         with_bbox_3d=True,
         with_label_3d=True,
         with_depth_map=True),
-    dict(type='Resize3D', scale=(910, 512), keep_ratio=True),
+    dict(type='Resize3D', scale=(928, 512), keep_ratio=False),
     # dict(type='RandomFlip3D', flip_ratio_bev_horizontal=0.5),
     dict(
         type='Pack3DDetInputs',
@@ -38,7 +38,7 @@ train_pipeline = [
 
 test_pipeline = [
     dict(type='LoadImageFromFileMono3D'),
-    dict(type='Resize3D', scale=(910, 512), keep_ratio=True),
+    dict(type='Resize3D', scale=(928, 512), keep_ratio=False),
     dict(type='Pack3DDetInputs', keys=['img'])
 ]
 
@@ -103,6 +103,6 @@ val_evaluator = dict(
 
 test_evaluator = val_evaluator
 
-vis_backends = [dict(type='LocalVisBackend')]
-visualizer = dict(
-    type='Det3DLocalVisualizer', vis_backends=vis_backends, name='visualizer')
+# vis_backends = [dict(type='LocalVisBackend')]
+# visualizer = dict(
+# type='Det3DLocalVisualizer', vis_backends=vis_backends, name='visualizer')

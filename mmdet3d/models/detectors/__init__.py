@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from .base import Base3DDetector
 from .centerpoint import CenterPoint
+from .dense_depth_predictor import DenseDepthPredictor
 from .dfm import DfM
 from .dynamic_voxelnet import DynamicVoxelNet
 from .fcos_mono3d import FCOSMono3D
@@ -28,5 +29,5 @@ __all__ = [
     'CenterPoint', 'SSD3DNet', 'ImVoteNet', 'SingleStageMono3DDetector',
     'FCOSMono3D', 'ImVoxelNet', 'GroupFree3DNet', 'PointRCNN', 'SMOKEMono3D',
     'SASSD', 'MinkSingleStage3DDetector', 'MultiViewDfM', 'DfM',
-    'PointVoxelRCNN'
+    'PointVoxelRCNN', 'DenseDepthPredictor'
 ]
