@@ -317,7 +317,6 @@ class DenseDepthHead(BaseModule):
 
         loss_dict = {}
         for lvl, x in enumerate(dense_depth):
-            print('lvl level:', x.shape)
             loss_lvl = self.loss_dense_depth(x, gt_dense_depth)
             # loss_lvl = loss_lvl / (torch.sqrt(2)**lvl)  # Is sqrt(2) good?
             loss_dict.update({f'loss_dense_depth_lvl_{lvl}': loss_lvl})

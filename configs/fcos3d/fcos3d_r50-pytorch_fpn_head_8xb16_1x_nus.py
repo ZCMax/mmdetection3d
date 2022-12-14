@@ -14,6 +14,12 @@ model = dict(
 
 train_dataloader = dict(batch_size=16, num_workers=2)
 
+# optimizer
+optim_wrapper = dict(
+    optimizer=dict(lr=0.002),
+    paramwise_cfg=dict(bias_lr_mult=2., bias_decay_mult=0.),
+    clip_grad=dict(max_norm=35, norm_type=2))
+
 # learning rate
 param_scheduler = [
     dict(

@@ -833,7 +833,6 @@ class LoadAnnotations3D(LoadAnnotations):
         ix = np.round(pts_img[:, 0]).astype(np.int64)
         depth_img[iy, ix] = pts_img[:, 2]
         results['depth_map'] = depth_img
-        print(depth_img.shape)
 
         return results
 
