@@ -10,8 +10,7 @@ model = dict(
         mean=[103.530, 116.280, 123.675],
         std=[1.0, 1.0, 1.0],
         bgr_to_rgb=False,
-        pad_size_divisor=32),
-    backbone=dict(depth=50))
+        pad_size_divisor=32))
 
 train_dataloader = dict(batch_size=16, num_workers=2)
 
