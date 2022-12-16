@@ -401,6 +401,35 @@ class Det3DLocalVisualizer(DetLocalVisualizer):
             face_colors=face_colors)
 
     @master_only
+    def draw_depth_map(
+            self,
+            depth_map,
+            sizes: Optional[Union[np.ndarray, Tensor, int]] = 10) -> None:
+        """Draw projected points on the image.
+
+        Args:
+            positions (Union[np.ndarray, torch.Tensor]): Positions to draw.
+            pts2imgs (np,ndarray): The transformatino matrix from the
+                coordinate of point cloud to image plane.
+            sizes (Optional[Union[np.ndarray, torch.Tensor, int]]): The
+                marker size. Default to 10.
+        """
+        assert self._image is not None, 'Please set image using `set_image`'
+        indices = np.nonzero(depth_map)
+        depths = depth_map[indices]
+        colors = (depths % 20) / 20
+        # use colormap to obtain the render color
+        color_map = plt.get_cmap('jet')
+        self.ax_save.scatter(
+            indices[1],
+            indices[0],
+            c=colors,
+            cmap=color_map,
+            s=sizes,
+            alpha=0.5,
+            edgecolors='none')
+
+    @master_only
     def draw_points_on_image(
             self,
             points: Union[np.ndarray, Tensor],

@@ -56,6 +56,18 @@ def get_dataset_cfg(fname):
     return dataset
 
 
+def get_visualizer_cfg(fname):
+    """Grab configs necessary to create a model.
+
+    These are deep copied to allow for safe modification of parameters without
+    influencing other tests.
+    """
+    config = _get_config_module(fname)
+    visualizer = copy.deepcopy(config.visualizer)
+
+    return visualizer
+
+
 def get_model_cfg(fname):
     """Grab configs necessary to create a model.
 
